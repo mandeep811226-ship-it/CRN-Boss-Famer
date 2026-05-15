@@ -909,4 +909,3 @@ public class BotForegroundService extends Service {
     private static void sleep(long ms)throws InterruptedException{Thread.sleep(ms);}
     private String cookieValue(String name){String cookie=CookieManager.getInstance().getCookie(BASE);if(cookie==null)return "";for(String part:cookie.split(";")){String[]kv=part.trim().split("=",2);if(kv.length==2&&kv[0].equals(name))return kv[1];}return "";}
 }
-}
