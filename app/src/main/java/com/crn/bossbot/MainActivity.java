@@ -55,8 +55,7 @@ public class MainActivity extends Activity {
     private static final String[][] BUILTIN_WAVES = {
         { "grakthar", "Grakthar", "https://demonicscans.org/active_wave.php?gate=3&wave=8" },
         { "olympus",  "Oly W9",   "https://demonicscans.org/active_wave.php?gate=5&wave=9"  },
-        { "olympus2", "Oly W10",  "https://demonicscans.org/active_wave.php?gate=5&wave=10" },
-        { "olympus3", "Oly W11",  "https://demonicscans.org/active_wave.php?gate=5&wave=11" },
+        { "hermes", "Hermes",  "https://demonicscans.org/active_wave.php?gate=5&wave=10" },
     };
 
     // ── Custom wave storage key ────────────────────────────────────────────────
@@ -81,8 +80,7 @@ public class MainActivity extends Activity {
               .putBoolean("global_enabled", false)
               .putBoolean("enable_grakthar", true)
               .putBoolean("enable_olympus",  true)
-              .putBoolean("enable_olympus2", true)
-              .putBoolean("enable_olympus3", true)
+              .putBoolean("enable_hermes", true)
               .putBoolean("smart_delay", true)
               .putBoolean("alerts", true)
               .putBoolean("auto_potion", true)
@@ -909,8 +907,7 @@ public class MainActivity extends Activity {
         addSwitch(box, "Global ON/OFF",          "global_enabled");
         addSwitch(box, "Enable Grakthar",         "enable_grakthar");
         addSwitch(box, "Enable Olympus W9",       "enable_olympus");
-        addSwitch(box, "Enable Olympus W10",      "enable_olympus2");
-        addSwitch(box, "Enable Olympus W11",      "enable_olympus3");
+        addSwitch(box, "Enable Hermes",      "enable_hermes");
         // Custom waves
         for (String[] w : loadCustomWaves()) {
             addSwitch(box, "Enable " + w[1], "enable_" + w[0]);
