@@ -1,0 +1,90 @@
+name: Build & Release APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:   # allows manual trigger from GitHub UI
+
+jobs:
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Set up Java 17
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      # 3. Cache Gradle to speed up builds
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-
+
+      # 4. Give gradlew permission to execute
+      - name: Grant execute permission to gradlew
+        run: chmod +x gradlew
+
+      # 5. Build debug APK (no signing needed)
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+
+      # 6. Get current date and short commit SHA for release name
+      - name: Get build info
+        id: info
+        run: |
+          echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          echo "sha=$(echo $GITHUB_SHA | cut -c1-7)" >> $GITHUB_OUTPUT
+
+      # 7. Rename APK to something readable
+      - name: Rename APK
+        run: |
+          mv app/build/outputs/apk/debug/app-debug.apk \
+             app/build/outputs/apk/debug/CRN_Boss_${{ steps.info.outputs.date }}_${{ steps.info.outputs.sha }}.apk
+
+      # 8. Upload APK as artifact (always available in Actions tab)
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CRN_Boss_APK_${{ steps.info.outputs.date }}
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 30
+
+      # 9. Create a GitHub Release with the APK attached
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ steps.info.outputs.date }}-${{ steps.info.outputs.sha }}
+          name: "CRN Boss Bot — ${{ steps.info.outputs.date }} (${{ steps.info.outputs.sha }})"
+          body: |
+            ## Auto-build 🤖
+
+            **Commit:** `${{ github.sha }}`
+            **Branch:** `${{ github.ref_name }}`
+            **Date:** ${{ steps.info.outputs.date }}
+
+            ### What's inside
+            - Debug APK — install directly on your phone
+            - Built from latest `main` branch
+
+            ### Install
+            1. Download the `.apk` file below
+            2. Enable **Install unknown apps** on your phone
+            3. Open the APK and install
+          files: app/build/outputs/apk/debug/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
