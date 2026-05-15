@@ -361,7 +361,9 @@ public class MainActivity extends Activity {
 
     // ── Panel host ─────────────────────────────────────────────────────────────
     private void buildPanelHost(LinearLayout shell) {
-        FrameLayout host = new FrameLayout(this);
+        // Outer vertical layout: scroll area takes all space, nav always at bottom
+        LinearLayout host = new LinearLayout(this);
+        host.setOrientation(LinearLayout.VERTICAL);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
@@ -369,7 +371,7 @@ public class MainActivity extends Activity {
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(10), dp(8), dp(10), dp(96));
+        content.setPadding(dp(10), dp(8), dp(10), dp(8));
 
         // ALL panel
         tabAllPanel = buildAllPanel();
@@ -389,8 +391,8 @@ public class MainActivity extends Activity {
         content.addView(tabLogsPanel);
 
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
-        host.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
-        host.addView(buildBottomNav(), new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
+        host.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
+        host.addView(buildBottomNav(), new LinearLayout.LayoutParams(-1, -2));
 
         shell.addView(host, new LinearLayout.LayoutParams(-1, 0, 1));
         switchTab(activeTab);
