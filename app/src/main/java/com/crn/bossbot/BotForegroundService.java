@@ -64,8 +64,7 @@ public class BotForegroundService extends Service {
     private static final Category[] BUILTIN_CATEGORIES = {
         new Category("grakthar", "Grakthar",  BASE + "/active_wave.php?gate=3&wave=8"),
         new Category("olympus",  "Olympus",   BASE + "/active_wave.php?gate=5&wave=9"),
-        new Category("olympus2", "Olympus2",  BASE + "/active_wave.php?gate=5&wave=10"),
-        new Category("olympus3", "Olympus3",  BASE + "/active_wave.php?gate=5&wave=11"),
+        new Category("hermes", "Hermes",  BASE + "/active_wave.php?gate=5&wave=10"),
     };
 
     /**
