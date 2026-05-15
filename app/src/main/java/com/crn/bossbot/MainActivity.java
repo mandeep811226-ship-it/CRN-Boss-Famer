@@ -44,9 +44,16 @@ public class MainActivity extends Activity {
     private String currentScreen = "main";
     private int activeTab = 0;           // 0 = ALL, 1..N = wave tabs, last = LOGS
 
+    // ── Debounce UI rebuilds so broadcasts don't cause constant dancing ─────────
+    private final Handler uiHandler = new Handler(Looper.getMainLooper());
+    private final Runnable uiRefreshRunnable = () -> { if ("main".equals(currentScreen)) showMain(); };
+
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
-            if ("main".equals(currentScreen)) refreshMainUi();
+            if ("main".equals(currentScreen)) {
+                uiHandler.removeCallbacks(uiRefreshRunnable);
+                uiHandler.postDelayed(uiRefreshRunnable, 1500);
+            }
         }
     };
 
@@ -543,7 +550,11 @@ public class MainActivity extends Activity {
         panel.addView(subHead);
 
         if (bosses.isEmpty()) {
-            panel.addView(emptyCard("No bosses found for " + label + " yet."));
+            boolean botRunning = sp.getBoolean("global_enabled", false);
+            String emptyMsg = botRunning
+                ? "⌛ Scanning for bosses in " + label + "…"
+                : "No bosses found for " + label + " yet. Start the bot to scan.";
+            panel.addView(emptyCard(emptyMsg));
             return panel;
         }
 
@@ -606,24 +617,33 @@ public class MainActivity extends Activity {
         c.setBackground(cardBg);
         if (Build.VERSION.SDK_INT >= 21) c.setElevation(dp(1));
 
-        // row 1: full boss name + toggle
-        LinearLayout r1 = row(Gravity.TOP);
-        TextView nameTv = txt(name, 12, true, Color.WHITE);
+        // row 1: full boss name — uses a FrameLayout so the switch overlays
+        // top-right without stealing horizontal space from the name text.
+        FrameLayout nameArea = new FrameLayout(this);
+        LinearLayout.LayoutParams naLp = lpW(-1);
+        naLp.setMargins(0, 0, 0, dp(4));
+        nameArea.setLayoutParams(naLp);
+
+        TextView nameTv = txt(name, 11, true, Color.WHITE);
         nameTv.setSingleLine(false);
-        nameTv.setMaxLines(3);
-        r1.addView(nameTv, lp0(1));
+        nameTv.setMaxLines(4);
+        // Right padding so long names don't slide under the switch thumb
+        nameTv.setPadding(0, dp(2), dp(44), 0);
+        nameArea.addView(nameTv, new FrameLayout.LayoutParams(-1, -2));
 
         Switch sw = new Switch(this);
         sw.setChecked(enabled);
-        sw.setScaleX(0.72f);
-        sw.setScaleY(0.72f);
+        sw.setScaleX(0.70f);
+        sw.setScaleY(0.70f);
         sw.setPadding(0, 0, 0, 0);
         sw.setOnCheckedChangeListener((btn, val) -> {
             sp.edit().putBoolean(prefKey, val).apply();
             cardBg.setAlpha(val ? 255 : 120);
         });
-        r1.addView(sw, lpWH(dp(46), dp(28)));
-        c.addView(r1);
+        FrameLayout.LayoutParams swFlp = new FrameLayout.LayoutParams(-2, -2);
+        swFlp.gravity = Gravity.TOP | Gravity.END;
+        nameArea.addView(sw, swFlp);
+        c.addView(nameArea);
 
         // row 2: status pill + damage value
         LinearLayout r2 = row(Gravity.CENTER_VERTICAL);
@@ -1300,20 +1320,18 @@ public class MainActivity extends Activity {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private View buildProgressBar(float pct, int width, int height) {
-        FrameLayout wrap = new FrameLayout(this);
+        // Use a weight-based LinearLayout so no post() callbacks are needed,
+        // which was the cause of the progress bar "dancing" on every UI refresh.
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
         LinearLayout.LayoutParams wlp = lpW(width < 0 ? -1 : width);
         wlp.setMargins(0, dp(4), 0, 0);
-        wrap.setLayoutParams(wlp);
+        bar.setLayoutParams(wlp);
 
-        View track = new View(this);
-        track.setBackgroundColor(Color.argb(40, 255, 255, 255));
-        GradientDrawable td = new GradientDrawable();
-        td.setColor(Color.argb(40, 255, 255, 255));
-        td.setCornerRadius(dp(2));
-        track.setBackground(td);
-        wrap.addView(track, new FrameLayout.LayoutParams(-1, height));
+        float fillWeight  = Math.min(Math.max(pct, 0f), 1f);
+        float emptyWeight = 1f - fillWeight;
 
-        if (pct > 0) {
+        if (fillWeight > 0) {
             View fill = new View(this);
             GradientDrawable fd = new GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
@@ -1323,21 +1341,19 @@ public class MainActivity extends Activity {
             );
             fd.setCornerRadius(dp(2));
             fill.setBackground(fd);
-            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams((int)(pct * (width < 0 ? 9999 : width)), height);
-            if (width < 0) {
-                // use weight trick: post to measure
-                fill.setTag(pct);
-                wrap.addView(fill, new FrameLayout.LayoutParams(-1, height));
-                wrap.post(() -> {
-                    int w = wrap.getWidth();
-                    fill.getLayoutParams().width = (int)(((Float) fill.getTag()) * w);
-                    fill.requestLayout();
-                });
-            } else {
-                wrap.addView(fill, flp);
-            }
+            bar.addView(fill, new LinearLayout.LayoutParams(0, height, fillWeight));
         }
-        return wrap;
+
+        if (emptyWeight > 0) {
+            View empty = new View(this);
+            GradientDrawable ed = new GradientDrawable();
+            ed.setColor(Color.argb(40, 255, 255, 255));
+            ed.setCornerRadius(dp(2));
+            empty.setBackground(ed);
+            bar.addView(empty, new LinearLayout.LayoutParams(0, height, emptyWeight));
+        }
+
+        return bar;
     }
 
     private View emptyCard(String msg) {
