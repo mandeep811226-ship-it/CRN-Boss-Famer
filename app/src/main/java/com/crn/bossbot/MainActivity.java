@@ -104,7 +104,15 @@ public class MainActivity extends Activity {
         requestInitialScanOnce();
     }
 
-    @Override protected void onResume()  { super.onResume();  registerReceiver(receiver, new IntentFilter(BotForegroundService.ACTION_STATUS), RECEIVER_NOT_EXPORTED); }
+    @Override protected void onResume()  {
+        super.onResume();
+        IntentFilter filter = new IntentFilter(BotForegroundService.ACTION_STATUS);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(receiver, filter);
+        }
+    }
     @Override protected void onPause()   { try { unregisterReceiver(receiver); } catch (Exception ignored) {} super.onPause(); }
     @Override public void onBackPressed(){ if (!"main".equals(currentScreen)) showMain(); else super.onBackPressed(); }
 
@@ -204,7 +212,6 @@ public class MainActivity extends Activity {
             strip.addView(cell, lp);
         }
 
-        strip.addView(divider());  // bottom line
         View wrap = new LinearLayout(this);
         ((LinearLayout)wrap).setOrientation(LinearLayout.VERTICAL);
         ((LinearLayout)wrap).addView(strip, lpW(-1));
@@ -402,6 +409,9 @@ public class MainActivity extends Activity {
     private LinearLayout buildAllPanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setLayoutParams(new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         List<String[]> lines = parseBossLines(sp.getString("last_bosses", ""));
 
@@ -505,6 +515,9 @@ public class MainActivity extends Activity {
     private LinearLayout buildWavePanel(String[] waveDef, List<String[]> allLines) {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setLayoutParams(new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         String key   = waveDef[0];
         String label = waveDef[1];
@@ -658,6 +671,9 @@ public class MainActivity extends Activity {
     private LinearLayout buildLogsPanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setLayoutParams(new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         // toolbar
         LinearLayout head = row(Gravity.CENTER_VERTICAL);
@@ -1361,6 +1377,8 @@ public class MainActivity extends Activity {
     private View divider() {
         View d = new View(this);
         d.setBackgroundColor(C_BORDER);
+        d.setLayoutParams(new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT, dp(1)));
         return d;
     }
 
