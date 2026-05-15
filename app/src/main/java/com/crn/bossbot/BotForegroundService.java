@@ -16,8 +16,6 @@ import java.util.*;
 import java.util.regex.*;
 
 public class BotForegroundService extends Service {
-
-public class BotForegroundService extends Service {
     public static final String ACTION_START      = "START";
     public static final String ACTION_STOP       = "STOP";
     public static final String ACTION_STATUS     = "com.crn.bossbot.STATUS";
