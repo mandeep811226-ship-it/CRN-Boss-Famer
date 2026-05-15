@@ -1189,8 +1189,8 @@ public class MainActivity extends Activity {
     private GradientDrawable inputBg() {
         return roundRect(C_CARD, dp(8), C_BORDER2);
     }
-* "so phase names like \"Hermes, Ascended Herald\" and \"Hermes, Duvube Herald\"";
-     * both collapse to "hermes" for pref keys and cap keys.
+/**
+     * so phase names like "Hermes, Ascended Herald" and "Hermes, Duvube Herald"     * both collapse to "hermes" for pref keys and cap keys.
      */
     private static String bossRootKey(String name) {
         if (name == null || name.isEmpty()) return "";
