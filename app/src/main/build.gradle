@@ -1,0 +1,7 @@
+plugins { id 'com.android.application' }
+
+android {
+    namespace 'com.crn.bossbot'
+    compileSdk 35
+    defaultConfig { applicationId 'com.crn.bossbot'; minSdk 26; targetSdk 35; versionCode 13; versionName '1.2.1' }
+}
