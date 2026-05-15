@@ -1,0 +1,23 @@
+# Built outputs
+/build
+/app/build
+*.apk
+*.aab
+
+# Gradle
+.gradle
+gradle-wrapper.jar
+
+# IDE
+.idea/
+*.iml
+local.properties
+
+# Keys — NEVER commit these
+*.keystore
+*.jks
+keystore.properties
+
+# OS
+.DS_Store
+Thumbs.db
