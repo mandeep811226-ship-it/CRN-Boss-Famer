@@ -804,7 +804,7 @@ public class BotForegroundService extends Service {
         StringBuilder sb=new StringBuilder();
         for (String[] row:merged.values()) {
             if(sb.length()>0) sb.append("\n");
-            sb.append(row[0]).append("|").append(row[1]).append("|").append(row[2]).append("|").append(row[3]).append("|").append(row[4]).append("|").append(row[5]).append("|").append(row.length>6?row[6]:"");
+            sb.append(row[0]).append("|").append(row[1]).append("|").append(row[2]).append("|").append(row[3]).append("|").append(row[4]).append("|").append(row[5]).append("|").append(row.length>6?row[6]:"").append("|").append(row.length>7?row[7]:"").append("|").append(row.length>8?row[8]:"");
         }
         sp.edit().putString("last_bosses",sb.toString()).apply();
     }
