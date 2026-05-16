@@ -44,37 +44,24 @@ public class MainActivity extends Activity {
     private String currentScreen = "main";
     private int activeTab = 0;           // 0 = ALL, 1..N = wave tabs, last = LOGS
 
-    // ── Debounce UI rebuilds so broadcasts don't cause constant dancing ─────────
-    private final Handler uiHandler = new Handler(Looper.getMainLooper());
-    private final Runnable uiRefreshRunnable = () -> { if ("main".equals(currentScreen)) showMain(); };
-
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
-            if ("main".equals(currentScreen)) {
-                uiHandler.removeCallbacks(uiRefreshRunnable);
-                uiHandler.postDelayed(uiRefreshRunnable, 1500);
-            }
+            if ("main".equals(currentScreen)) refreshMainUi();
         }
     };
 
-    // ── Hardcoded built-in waves — always present, cannot be deleted ───────────
-    // { prefKey, displayLabel, fullUrl }
-    private static final String[][] BUILTIN_WAVES = {
-        { "grakthar", "Grakthar", "https://demonicscans.org/active_wave.php?gate=3&wave=8" },
-        { "olympus",  "Oly W9",   "https://demonicscans.org/active_wave.php?gate=5&wave=9"  },
-        { "hermes", "Hermes",  "https://demonicscans.org/active_wave.php?gate=5&wave=10" },
+    // ── tab data mirrors categories in BotForegroundService ────────────────────
+    // { prefKey, displayLabel, url-suffix (informational only) }
+    private static final String[][] WAVE_TABS = {
+        { "grakthar", "Grakthar",  "gate=3&wave=8"  },
+        { "olympus",  "Oly W9",    "gate=5&wave=9"  },
+        { "olympus2", "Oly W10",   "gate=5&wave=10" },
+        { "olympus3", "Oly W11",   "gate=5&wave=11" },
     };
 
-    // ── Custom wave storage key ────────────────────────────────────────────────
-    private static final String PREF_CUSTOM_WAVES = "custom_waves_json";
-
-    // ── Combined wave list built at showMain() time ────────────────────────────
-    // Each entry: { prefKey, displayLabel, fullUrl, emoji }
-    private List<String[]> allWaveTabs = new ArrayList<>();
-
-    // ── live tab-panel views ───────────────────────────────────────────────────
+    // ── live tab-panel views so we can refresh without rebuilding ───────────────
     private LinearLayout tabAllPanel;
-    private List<LinearLayout> wavePanelList = new ArrayList<>();
+    private final LinearLayout[] wavePanels = new LinearLayout[WAVE_TABS.length];
     private LinearLayout tabLogsPanel;
     private HorizontalScrollView tabBarScroll;
     private LinearLayout tabBarInner;
@@ -87,7 +74,8 @@ public class MainActivity extends Activity {
               .putBoolean("global_enabled", false)
               .putBoolean("enable_grakthar", true)
               .putBoolean("enable_olympus",  true)
-              .putBoolean("enable_hermes", true)
+              .putBoolean("enable_olympus2", true)
+              .putBoolean("enable_olympus3", true)
               .putBoolean("smart_delay", true)
               .putBoolean("alerts", true)
               .putBoolean("auto_potion", true)
@@ -111,15 +99,7 @@ public class MainActivity extends Activity {
         requestInitialScanOnce();
     }
 
-    @Override protected void onResume()  {
-        super.onResume();
-        IntentFilter filter = new IntentFilter(BotForegroundService.ACTION_STATUS);
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(receiver, filter);
-        }
-    }
+    @Override protected void onResume()  { super.onResume();  registerReceiver(receiver, new IntentFilter(BotForegroundService.ACTION_STATUS), RECEIVER_NOT_EXPORTED); }
     @Override protected void onPause()   { try { unregisterReceiver(receiver); } catch (Exception ignored) {} super.onPause(); }
     @Override public void onBackPressed(){ if (!"main".equals(currentScreen)) showMain(); else super.onBackPressed(); }
 
@@ -130,9 +110,6 @@ public class MainActivity extends Activity {
     private void showMain() {
         currentScreen = "main";
         destroyLogin();
-        // Rebuild combined wave list every time so custom waves are always fresh
-        allWaveTabs = buildAllWaveTabs();
-        wavePanelList = new ArrayList<>();
         root.removeAllViews();
         root.setBackgroundColor(C_BG);
 
@@ -219,6 +196,7 @@ public class MainActivity extends Activity {
             strip.addView(cell, lp);
         }
 
+        strip.addView(divider());  // bottom line
         View wrap = new LinearLayout(this);
         ((LinearLayout)wrap).setOrientation(LinearLayout.VERTICAL);
         ((LinearLayout)wrap).addView(strip, lpW(-1));
@@ -250,20 +228,14 @@ public class MainActivity extends Activity {
 
         // Tab 0 = ALL
         tabBarInner.addView(buildTab(0, "🗺️", "All", aliveCountAll()));
-
-        // Wave tabs 1..N (builtin + custom combined)
-        for (int i = 0; i < allWaveTabs.size(); i++) {
-            String[] wt = allWaveTabs.get(i);
-            String emoji = wt.length > 3 ? wt[3] : waveIcon(wt[0]);
-            tabBarInner.addView(buildTab(i + 1, emoji, wt[1], aliveCountForKey(wt[0])));
+        // Wave tabs 1..N
+        for (int i = 0; i < WAVE_TABS.length; i++) {
+            String[] wt = WAVE_TABS[i];
+            tabBarInner.addView(buildTab(i + 1, waveIcon(wt[0]), wt[1], aliveCountForKey(wt[0])));
         }
-
-        // Logs tab
-        int logsIdx = allWaveTabs.size() + 1;
+        // Logs tab = last
+        int logsIdx = WAVE_TABS.length + 1;
         tabBarInner.addView(buildTab(logsIdx, "📋", "Logs", logCount() + ""));
-
-        // ➕ Add wave button — always at end
-        tabBarInner.addView(buildAddTab());
 
         tabBarScroll.addView(tabBarInner, new LinearLayout.LayoutParams(-2, -1));
 
@@ -275,26 +247,6 @@ public class MainActivity extends Activity {
         shell.addView(wrap, lpW(-1));
 
         highlightTab(activeTab);
-    }
-
-    /** The ➕ button at the end of the tab bar */
-    private View buildAddTab() {
-        LinearLayout tab = new LinearLayout(this);
-        tab.setOrientation(LinearLayout.VERTICAL);
-        tab.setGravity(Gravity.CENTER);
-        tab.setPadding(dp(14), dp(8), dp(14), dp(6));
-        tab.setMinimumWidth(dp(54));
-
-        TextView plus = txt("➕", 18, false, C_ACCENT);
-        plus.setGravity(Gravity.CENTER);
-        tab.addView(plus);
-
-        TextView lbl = txt("Add", 8, true, C_MUTED);
-        lbl.setGravity(Gravity.CENTER);
-        tab.addView(lbl);
-
-        tab.setOnClickListener(v -> showAddWaveDialog());
-        return tab;
     }
 
     private View buildTab(final int idx, String icon, String name, String pip) {
@@ -319,19 +271,6 @@ public class MainActivity extends Activity {
         tab.addView(pipTv);
 
         tab.setOnClickListener(v -> switchTab(idx));
-
-        // Long-press on wave tabs → show delete option
-        // idx 0 = ALL, 1..N = waves, logsIdx = logs
-        int waveIdx = idx - 1;
-        if (waveIdx >= 0 && waveIdx < allWaveTabs.size()) {
-            String[] wave = allWaveTabs.get(waveIdx);
-            boolean isBuiltin = waveIdx < BUILTIN_WAVES.length;
-            tab.setOnLongClickListener(v -> {
-                showDeleteWaveDialog(wave, isBuiltin);
-                return true;
-            });
-        }
-
         return tab;
     }
 
@@ -353,11 +292,12 @@ public class MainActivity extends Activity {
     private void switchTab(int idx) {
         activeTab = idx;
         highlightTab(idx);
-        int total = allWaveTabs.size() + 2; // ALL + waves + LOGS
+        int total = WAVE_TABS.length + 2; // ALL + waves + LOGS
         for (int i = 0; i < total; i++) {
             View panel = getPanelAt(i);
             if (panel != null) panel.setVisibility(i == idx ? View.VISIBLE : View.GONE);
         }
+        // scroll tab into view
         tabBarScroll.post(() -> {
             View tab = tabBarInner.getChildAt(idx);
             if (tab != null) tabBarScroll.smoothScrollTo(tab.getLeft(), 0);
@@ -365,50 +305,52 @@ public class MainActivity extends Activity {
     }
 
     private View getPanelAt(int i) {
-        int logsIdx = allWaveTabs.size() + 1;
+        int logsIdx = WAVE_TABS.length + 1;
         if (i == 0) return tabAllPanel;
         if (i == logsIdx) return tabLogsPanel;
         int waveIdx = i - 1;
-        if (waveIdx >= 0 && waveIdx < wavePanelList.size()) return wavePanelList.get(waveIdx);
+        if (waveIdx >= 0 && waveIdx < wavePanels.length) return wavePanels[waveIdx];
         return null;
     }
 
     // ── Panel host ─────────────────────────────────────────────────────────────
     private void buildPanelHost(LinearLayout shell) {
-        // Outer vertical layout: scroll area takes all space, nav always at bottom
-        LinearLayout host = new LinearLayout(this);
-        host.setOrientation(LinearLayout.VERTICAL);
+        // panels fill remaining space; bottom nav floats over them
+        FrameLayout host = new FrameLayout(this);
 
+        // scrollable content area
         ScrollView scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(C_BG);
 
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        content.setPadding(dp(10), dp(8), dp(10), dp(8));
+        content.setPadding(dp(10), dp(8), dp(10), dp(96)); // bottom padding clears nav
 
-        // ALL panel
+        // build ALL panel
         tabAllPanel = buildAllPanel();
         content.addView(tabAllPanel);
 
-        // Wave panels — builtin + custom combined
+        // build wave panels
         List<String[]> allBossLines = parseBossLines(sp.getString("last_bosses", ""));
-        wavePanelList.clear();
-        for (String[] wt : allWaveTabs) {
-            LinearLayout p = buildWavePanel(wt, allBossLines);
-            wavePanelList.add(p);
-            content.addView(p);
+        for (int i = 0; i < WAVE_TABS.length; i++) {
+            wavePanels[i] = buildWavePanel(WAVE_TABS[i], allBossLines);
+            content.addView(wavePanels[i]);
         }
 
-        // Logs panel
+        // build logs panel
         tabLogsPanel = buildLogsPanel();
         content.addView(tabLogsPanel);
 
         scroll.addView(content, new ScrollView.LayoutParams(-1, -2));
-        host.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        host.addView(buildBottomNav(), new LinearLayout.LayoutParams(-1, -2));
+        host.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+
+        // bottom nav floats
+        host.addView(buildBottomNav(), new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM));
 
         shell.addView(host, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        // apply initial visibility
         switchTab(activeTab);
     }
 
@@ -416,9 +358,6 @@ public class MainActivity extends Activity {
     private LinearLayout buildAllPanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setLayoutParams(new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         List<String[]> lines = parseBossLines(sp.getString("last_bosses", ""));
 
@@ -522,9 +461,6 @@ public class MainActivity extends Activity {
     private LinearLayout buildWavePanel(String[] waveDef, List<String[]> allLines) {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setLayoutParams(new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         String key   = waveDef[0];
         String label = waveDef[1];
@@ -550,11 +486,7 @@ public class MainActivity extends Activity {
         panel.addView(subHead);
 
         if (bosses.isEmpty()) {
-            boolean botRunning = sp.getBoolean("global_enabled", false);
-            String emptyMsg = botRunning
-                ? "⌛ Scanning for bosses in " + label + "…"
-                : "No bosses found for " + label + " yet. Start the bot to scan.";
-            panel.addView(emptyCard(emptyMsg));
+            panel.addView(emptyCard("No bosses found for " + label + " yet."));
             return panel;
         }
 
@@ -569,9 +501,10 @@ public class MainActivity extends Activity {
     }
 
     private void toggleAllBosses(String key, List<String[]> bosses) {
+        // if all enabled → disable all; otherwise enable all
         boolean anyOff = false;
         for (String[] p : bosses) {
-            String bKey = norm(p[0]) + ":" + bossRootKey(p[1]);
+            String bKey = norm(p[0]) + ":" + norm(p[1]);
             if (!sp.getBoolean("boss_enabled_" + bKey, true)) { anyOff = true; break; }
         }
         boolean target = anyOff;
@@ -617,33 +550,24 @@ public class MainActivity extends Activity {
         c.setBackground(cardBg);
         if (Build.VERSION.SDK_INT >= 21) c.setElevation(dp(1));
 
-        // row 1: full boss name — uses a FrameLayout so the switch overlays
-        // top-right without stealing horizontal space from the name text.
-        FrameLayout nameArea = new FrameLayout(this);
-        LinearLayout.LayoutParams naLp = lpW(-1);
-        naLp.setMargins(0, 0, 0, dp(4));
-        nameArea.setLayoutParams(naLp);
-
-        TextView nameTv = txt(name, 11, true, Color.WHITE);
+        // row 1: full boss name + toggle
+        LinearLayout r1 = row(Gravity.TOP);
+        TextView nameTv = txt(name, 12, true, Color.WHITE);
         nameTv.setSingleLine(false);
-        nameTv.setMaxLines(4);
-        // Right padding so long names don't slide under the switch thumb
-        nameTv.setPadding(0, dp(2), dp(44), 0);
-        nameArea.addView(nameTv, new FrameLayout.LayoutParams(-1, -2));
+        nameTv.setMaxLines(3);
+        r1.addView(nameTv, lp0(1));
 
         Switch sw = new Switch(this);
         sw.setChecked(enabled);
-        sw.setScaleX(0.70f);
-        sw.setScaleY(0.70f);
+        sw.setScaleX(0.72f);
+        sw.setScaleY(0.72f);
         sw.setPadding(0, 0, 0, 0);
         sw.setOnCheckedChangeListener((btn, val) -> {
             sp.edit().putBoolean(prefKey, val).apply();
             cardBg.setAlpha(val ? 255 : 120);
         });
-        FrameLayout.LayoutParams swFlp = new FrameLayout.LayoutParams(-2, -2);
-        swFlp.gravity = Gravity.TOP | Gravity.END;
-        nameArea.addView(sw, swFlp);
-        c.addView(nameArea);
+        r1.addView(sw, lpWH(dp(46), dp(28)));
+        c.addView(r1);
 
         // row 2: status pill + damage value
         LinearLayout r2 = row(Gravity.CENTER_VERTICAL);
@@ -691,9 +615,6 @@ public class MainActivity extends Activity {
     private LinearLayout buildLogsPanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setLayoutParams(new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         // toolbar
         LinearLayout head = row(Gravity.CENTER_VERTICAL);
@@ -945,11 +866,8 @@ public class MainActivity extends Activity {
         addSwitch(box, "Global ON/OFF",          "global_enabled");
         addSwitch(box, "Enable Grakthar",         "enable_grakthar");
         addSwitch(box, "Enable Olympus W9",       "enable_olympus");
-        addSwitch(box, "Enable Hermes",      "enable_hermes");
-        // Custom waves
-        for (String[] w : loadCustomWaves()) {
-            addSwitch(box, "Enable " + w[1], "enable_" + w[0]);
-        }
+        addSwitch(box, "Enable Olympus W10",      "enable_olympus2");
+        addSwitch(box, "Enable Olympus W11",      "enable_olympus3");
         addSwitch(box, "Smart delay / jitter",    "smart_delay");
         addSwitch(box, "Vibrate + sound alerts",  "alerts");
         addSwitch(box, "Auto stamina potion",     "auto_potion");
@@ -1039,196 +957,13 @@ public class MainActivity extends Activity {
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //  CUSTOM WAVE MANAGEMENT
+    //  HELPERS — data
     // ═══════════════════════════════════════════════════════════════════════════
 
     /**
-     * Combines builtin hardcoded waves + user-added custom waves into one list.
-     * Each entry: { prefKey, displayLabel, fullUrl, emoji }
-     */
-    private List<String[]> buildAllWaveTabs() {
-        List<String[]> all = new ArrayList<>();
-        // builtin waves — assign default emoji
-        for (String[] w : BUILTIN_WAVES) {
-            all.add(new String[]{ w[0], w[1], w[2], waveIcon(w[0]) });
-        }
-        // custom user-added waves
-        all.addAll(loadCustomWaves());
-        return all;
-    }
-
-    /**
-     * Loads user-added waves from SharedPreferences.
-     * Stored as pipe-delimited lines: prefKey|label|url|emoji
-     */
-    private List<String[]> loadCustomWaves() {
-        List<String[]> list = new ArrayList<>();
-        String raw = sp.getString(PREF_CUSTOM_WAVES, "");
-        if (raw == null || raw.isEmpty()) return list;
-        for (String line : raw.split("\n")) {
-            String[] parts = line.split("\\|", -1);
-            if (parts.length >= 4) list.add(parts);
-        }
-        return list;
-    }
-
-    /** Saves the current custom wave list back to SharedPreferences */
-    private void saveCustomWaves(List<String[]> waves) {
-        StringBuilder sb = new StringBuilder();
-        for (String[] w : waves) {
-            if (sb.length() > 0) sb.append("\n");
-            sb.append(w[0]).append("|").append(w[1]).append("|").append(w[2]).append("|").append(w[3]);
-        }
-        sp.edit().putString(PREF_CUSTOM_WAVES, sb.toString()).apply();
-        // Tell the service to reload categories
-        startService(new Intent(this, BotForegroundService.class)
-            .setAction(BotForegroundService.ACTION_RELOAD_WAVES));
-    }
-
-    /** Generates a unique pref key from the user's title */
-    private String customWavePrefKey(String title) {
-        return "custom_" + norm(title) + "_" + System.currentTimeMillis() % 10000;
-    }
-
-    /** Shows the Add Wave popup */
-    private void showAddWaveDialog() {
-        // Container
-        LinearLayout form = new LinearLayout(this);
-        form.setOrientation(LinearLayout.VERTICAL);
-        form.setPadding(dp(20), dp(16), dp(20), dp(8));
-        form.setBackgroundColor(C_SURFACE);
-
-        // Emoji field
-        form.addView(txt("Tab Icon (emoji)", 11, true, C_MUTED));
-        EditText emojiInput = new EditText(this);
-        emojiInput.setHint("e.g.  ⚡  🔥  💀  🌊");
-        emojiInput.setText("⚡");
-        emojiInput.setTextColor(C_TEXT);
-        emojiInput.setHintTextColor(C_MUTED);
-        emojiInput.setSingleLine(true);
-        emojiInput.setTextSize(16);
-        emojiInput.setBackground(inputBg());
-        emojiInput.setPadding(dp(10), dp(8), dp(10), dp(8));
-        LinearLayout.LayoutParams elp = lpW(-1);
-        elp.setMargins(0, dp(4), 0, dp(14));
-        emojiInput.setLayoutParams(elp);
-        form.addView(emojiInput);
-
-        // Title field
-        form.addView(txt("Wave Title", 11, true, C_MUTED));
-        EditText titleInput = new EditText(this);
-        titleInput.setHint("e.g.  Oly W12");
-        titleInput.setTextColor(C_TEXT);
-        titleInput.setHintTextColor(C_MUTED);
-        titleInput.setSingleLine(true);
-        titleInput.setTextSize(14);
-        titleInput.setBackground(inputBg());
-        titleInput.setPadding(dp(10), dp(8), dp(10), dp(8));
-        LinearLayout.LayoutParams tlp = lpW(-1);
-        tlp.setMargins(0, dp(4), 0, dp(14));
-        titleInput.setLayoutParams(tlp);
-        form.addView(titleInput);
-
-        // URL field
-        form.addView(txt("Wave URL", 11, true, C_MUTED));
-        EditText urlInput = new EditText(this);
-        urlInput.setHint("https://demonicscans.org/active_wave.php?gate=5&wave=12");
-        urlInput.setTextColor(C_TEXT);
-        urlInput.setHintTextColor(C_MUTED);
-        urlInput.setSingleLine(true);
-        urlInput.setTextSize(12);
-        urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        urlInput.setBackground(inputBg());
-        urlInput.setPadding(dp(10), dp(8), dp(10), dp(8));
-        LinearLayout.LayoutParams ulp = lpW(-1);
-        ulp.setMargins(0, dp(4), 0, dp(4));
-        urlInput.setLayoutParams(ulp);
-        form.addView(urlInput);
-
-        AlertDialog dialog = new AlertDialog.Builder(this)
-            .setTitle("➕  Add New Wave")
-            .setView(form)
-            .setPositiveButton("Add Wave", null) // set manually to prevent auto-dismiss on error
-            .setNegativeButton("Cancel", null)
-            .create();
-
-        dialog.setOnShowListener(d -> {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-                String emoji = emojiInput.getText().toString().trim();
-                String title = titleInput.getText().toString().trim();
-                String url   = urlInput.getText().toString().trim();
-
-                if (title.isEmpty()) { toast("Title is required"); return; }
-                if (url.isEmpty() || !url.startsWith("http")) { toast("Enter a valid URL"); return; }
-                if (emoji.isEmpty()) emoji = "⚡";
-
-                // Check for duplicate title
-                for (String[] w : loadCustomWaves()) {
-                    if (w[1].equalsIgnoreCase(title)) { toast("A wave with this title already exists"); return; }
-                }
-
-                String prefKey = customWavePrefKey(title);
-                // Enable the new wave by default
-                sp.edit().putBoolean("enable_" + prefKey, true).apply();
-
-                List<String[]> customs = loadCustomWaves();
-                customs.add(new String[]{ prefKey, title, url, emoji });
-                saveCustomWaves(customs);
-
-                // Switch to the new tab after rebuild
-                activeTab = 1 + allWaveTabs.size(); // will be last wave tab after rebuild
-                dialog.dismiss();
-                toast("Wave added!");
-                showMain();
-            });
-        });
-
-        dialog.show();
-    }
-
-    /**
-     * Long-press on a custom wave tab → shows delete option.
-     * Built-in waves show a "cannot delete" message.
-     */
-    private void showDeleteWaveDialog(String[] wave, boolean isBuiltin) {
-        if (isBuiltin) {
-            new AlertDialog.Builder(this)
-                .setTitle("Built-in Wave")
-                .setMessage("\"" + wave[1] + "\" is a built-in wave and cannot be deleted.")
-                .setPositiveButton("OK", null)
-                .show();
-            return;
-        }
-        new AlertDialog.Builder(this)
-            .setTitle("Delete Wave")
-            .setMessage("Remove \"" + wave[1] + "\" tab?\n\nBoss toggles and caps for this wave will also be cleared.")
-            .setPositiveButton("Delete", (d, w) -> {
-                List<String[]> customs = loadCustomWaves();
-                customs.removeIf(c -> c[0].equals(wave[0]));
-                saveCustomWaves(customs);
-                // Clean up boss prefs for this wave
-                SharedPreferences.Editor ed = sp.edit();
-                Map<String, ?> all = sp.getAll();
-                for (String key : all.keySet()) {
-                    if (key.startsWith("boss_enabled_" + wave[0]) || key.startsWith("cap_" + wave[0])) {
-                        ed.remove(key);
-                    }
-                }
-                ed.remove("enable_" + wave[0]).apply();
-                activeTab = 0;
-                toast("Wave removed");
-                showMain();
-            })
-            .setNegativeButton("Cancel", null)
-            .show();
-    }
-
-    /** Input field background drawable */
-    private GradientDrawable inputBg() {
-        return roundRect(C_CARD, dp(8), C_BORDER2);
-    }
-/**
-     * so phase names like "Hermes, Ascended Herald" and "Hermes, Duvube Herald"     * both collapse to "hermes" for pref keys and cap keys.
+     * Boss root key: strips everything after the first ',' or '-'
+     * so phase names like "Hermes, Ascended Herald" and "Hermes, Duvube Herald"
+     * both collapse to "hermes" for pref keys and cap keys.
      */
     private static String bossRootKey(String name) {
         if (name == null || name.isEmpty()) return "";
@@ -1320,18 +1055,20 @@ public class MainActivity extends Activity {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private View buildProgressBar(float pct, int width, int height) {
-        // Use a weight-based LinearLayout so no post() callbacks are needed,
-        // which was the cause of the progress bar "dancing" on every UI refresh.
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
+        FrameLayout wrap = new FrameLayout(this);
         LinearLayout.LayoutParams wlp = lpW(width < 0 ? -1 : width);
         wlp.setMargins(0, dp(4), 0, 0);
-        bar.setLayoutParams(wlp);
+        wrap.setLayoutParams(wlp);
 
-        float fillWeight  = Math.min(Math.max(pct, 0f), 1f);
-        float emptyWeight = 1f - fillWeight;
+        View track = new View(this);
+        track.setBackgroundColor(Color.argb(40, 255, 255, 255));
+        GradientDrawable td = new GradientDrawable();
+        td.setColor(Color.argb(40, 255, 255, 255));
+        td.setCornerRadius(dp(2));
+        track.setBackground(td);
+        wrap.addView(track, new FrameLayout.LayoutParams(-1, height));
 
-        if (fillWeight > 0) {
+        if (pct > 0) {
             View fill = new View(this);
             GradientDrawable fd = new GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
@@ -1341,19 +1078,21 @@ public class MainActivity extends Activity {
             );
             fd.setCornerRadius(dp(2));
             fill.setBackground(fd);
-            bar.addView(fill, new LinearLayout.LayoutParams(0, height, fillWeight));
+            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams((int)(pct * (width < 0 ? 9999 : width)), height);
+            if (width < 0) {
+                // use weight trick: post to measure
+                fill.setTag(pct);
+                wrap.addView(fill, new FrameLayout.LayoutParams(-1, height));
+                wrap.post(() -> {
+                    int w = wrap.getWidth();
+                    fill.getLayoutParams().width = (int)(((Float) fill.getTag()) * w);
+                    fill.requestLayout();
+                });
+            } else {
+                wrap.addView(fill, flp);
+            }
         }
-
-        if (emptyWeight > 0) {
-            View empty = new View(this);
-            GradientDrawable ed = new GradientDrawable();
-            ed.setColor(Color.argb(40, 255, 255, 255));
-            ed.setCornerRadius(dp(2));
-            empty.setBackground(ed);
-            bar.addView(empty, new LinearLayout.LayoutParams(0, height, emptyWeight));
-        }
-
-        return bar;
+        return wrap;
     }
 
     private View emptyCard(String msg) {
@@ -1393,8 +1132,6 @@ public class MainActivity extends Activity {
     private View divider() {
         View d = new View(this);
         d.setBackgroundColor(C_BORDER);
-        d.setLayoutParams(new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(1)));
         return d;
     }
 
