@@ -249,6 +249,27 @@ public class BotForegroundService extends Service {
             all.addAll(parsed);
             append("INFO", c.label + " scan: " + parsed.size() + " boss cards");
         }
+        // ── Fetch battle page for each alive boss to get accurate auto-die timer ──
+        // The wave page's data-next-ts for alive bosses = next spawn time (after cycle),
+        // NOT the auto-die countdown. The real value is in the battle.php autoDieTimer div.
+        for (Boss b : all) {
+            if (b.alive && !empty(b.monsterId)) {
+                try {
+                    String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
+                    String raw = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>\\s*([0-9:]+)");
+                    if (!empty(raw)) {
+                        String[] tp = raw.trim().split(":");
+                        long secs = tp.length == 3
+                            ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
+                            : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
+                        b.timer = "Auto dies in " + formatSecs(secs);
+                        append("INFO", b.name + " auto-die: " + formatSecs(secs));
+                    }
+                } catch (Exception e) {
+                    append("ERROR", b.name + " auto-die fetch: " + e.getMessage());
+                }
+            }
+        }
         return all;
     }
 
@@ -284,6 +305,8 @@ public class BotForegroundService extends Service {
                 cleanHtml(first(summon, "(?is)<div[^>]+class=[\"'][^\"']*(?:name|title)[^\"']*[\"'][^>]*>(.*?)</div>"))
             );
             if (empty(b.name)) continue;
+            // Strip website-side truncation ("Boss Name..." or "Boss Name…") baked into HTML
+            b.name = b.name.replaceAll("(\\.{2,}|\u2026+)$", "").trim();
 
             // ── live card match uses root key so phases map to the same slot ──
             String rootKey = bossRootKey(b.name);
@@ -331,6 +354,8 @@ public class BotForegroundService extends Service {
                 b.categoryLabel = category.label;
                 b.name = firstNonEmpty(attr(live,"data-name"), cleanHtml(first(live,"(?is)<h[1-6][^>]*>(.*?)</h[1-6]>")));
                 if (empty(b.name)) continue;
+                // Strip website-side truncation markers
+                b.name = b.name.replaceAll("(\\.{2,}|\u2026+)$", "").trim();
                 String rootKey = bossRootKey(b.name);
                 b.key     = category.key + ":" + rootKey;
                 b.alive   = !"1".equals(attr(live,"data-dead"));
@@ -707,43 +732,55 @@ public class BotForegroundService extends Service {
         String live    = card2 == null ? "" : card2;
         String combined = summon + live;
 
-        // ── Method 1: data-next-ts Unix timestamp (most reliable) ─────────────
-        // The game stores next-spawn or auto-die timestamp on auto-summon-card
-        String nextTs = firstNonEmpty(attr(summon, "data-next-ts"), attr(combined, "data-next-ts"));
-        if (!empty(nextTs)) {
-            long ts = parseLong(nextTs);
-            if (ts > 0) {
-                long nowSec = System.currentTimeMillis() / 1000;
-                long diff = ts - nowSec;
-                if (diff > 0 && diff < 86400L * 30) {
-                    String aliveVal = attr(summon, "data-alive");
-                    boolean isAlive = "1".equals(aliveVal);
-                    return (isAlive ? "Auto dies in " : "Spawns in ") + formatSecs(diff);
+        String aliveVal = firstNonEmpty(attr(summon, "data-alive"), attr(summon, "data_alive"));
+        boolean isAlive = "1".equals(aliveVal);
+
+        // ── DEAD/waiting bosses only: data-next-ts = next spawn Unix timestamp ──
+        // NOTE: for ALIVE bosses, data-next-ts is the NEXT SPAWN time (after this
+        // cycle ends), NOT the auto-die time. Auto-die is fetched from battle.php
+        // in fetchBosses() and written directly to b.timer — do NOT use it here.
+        if (!isAlive) {
+            String nextTs = firstNonEmpty(attr(summon, "data-next-ts"), attr(combined, "data-next-ts"));
+            if (!empty(nextTs)) {
+                long ts = parseLong(nextTs);
+                if (ts > 0) {
+                    long nowSec = System.currentTimeMillis() / 1000;
+                    long diff = ts - nowSec;
+                    if (diff > 0 && diff < 86400L * 30) return "Spawns in " + formatSecs(diff);
                 }
+            }
+
+            // ── auto-summon-timer span text (e.g. "4m 58s", "10h 30m 34s") ────
+            String spanTimer = first(combined, "(?is)class=[\"'][^\"']*auto-summon-timer[^\"']*[\"'][^>]*>\\s*([^<]+)");
+            if (!empty(spanTimer)) return "Spawns in " + spanTimer.trim();
+
+            // ── Fallback data attributes for dead bosses ──────────────────────
+            String raw = firstNonEmpty(
+                attr(combined, "data-timer"),
+                attr(combined, "data-respawn"),
+                attr(combined, "data-respawn-time"),
+                attr(combined, "data-countdown"),
+                attr(combined, "data-time-remaining")
+            );
+            if (!empty(raw)) {
+                if (raw.matches("[0-9]{1,3}:[0-9]{2}:[0-9]{2}") || raw.matches("[0-9]{1,2}:[0-9]{2}")) return "Spawns in " + raw;
+                long secs = parseLong(raw);
+                if (secs > 0 && secs < 86400L * 7) return "Spawns in " + formatSecs(secs);
             }
         }
 
-        // ── Method 2: auto-summon-timer span text (e.g. "4m 58s") ────────────
-        String spanTimer = first(combined, "(?is)class=[\"'][^\"']*auto-summon-timer[^\"']*[\"'][^>]*>\\s*([^<]+)");
-        if (!empty(spanTimer)) return spanTimer.trim();
-
-        // ── Method 3: autoDieTimer div on battle page ─────────────────────────
+        // ── autoDieTimer from battle page (passed in live when available) ─────
         String dieTimer = first(combined, "(?is)id=[\"']autoDieTimer[\"'][^>]*>\\s*([0-9:]+)");
-        if (!empty(dieTimer)) return "Dies in " + dieTimer.trim();
-
-        // ── Fallback: other common data attributes ────────────────────────────
-        String raw = firstNonEmpty(
-            attr(combined, "data-timer"),
-            attr(combined, "data-respawn"),
-            attr(combined, "data-respawn-time"),
-            attr(combined, "data-countdown"),
-            attr(combined, "data-time-remaining")
-        );
-        if (!empty(raw)) {
-            if (raw.matches("[0-9]{1,2}:[0-9]{2}:[0-9]{2}") || raw.matches("[0-9]{1,2}:[0-9]{2}")) return raw;
-            long secs = parseLong(raw);
-            if (secs > 0 && secs < 86400L * 7) return formatSecs(secs);
+        if (!empty(dieTimer)) {
+            try {
+                String[] tp = dieTimer.trim().split(":");
+                long secs = tp.length == 3
+                    ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
+                    : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
+                return "Auto dies in " + formatSecs(secs);
+            } catch (Exception ignored) { return "Auto dies in " + dieTimer.trim(); }
         }
+
         return "";
     }
     private String formatSecs(long secs) {
