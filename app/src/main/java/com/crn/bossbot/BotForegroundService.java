@@ -703,29 +703,48 @@ public class BotForegroundService extends Service {
     }
 
     private String parseTimerFromCards(String card1, String card2) {
-        String combined = (card1 == null ? "" : card1) + (card2 == null ? "" : card2);
+        String summon  = card1 == null ? "" : card1;
+        String live    = card2 == null ? "" : card2;
+        String combined = summon + live;
+
+        // ── Method 1: data-next-ts Unix timestamp (most reliable) ─────────────
+        // The game stores next-spawn or auto-die timestamp on auto-summon-card
+        String nextTs = firstNonEmpty(attr(summon, "data-next-ts"), attr(combined, "data-next-ts"));
+        if (!empty(nextTs)) {
+            long ts = parseLong(nextTs);
+            if (ts > 0) {
+                long nowSec = System.currentTimeMillis() / 1000;
+                long diff = ts - nowSec;
+                if (diff > 0 && diff < 86400L * 30) {
+                    String aliveVal = attr(summon, "data-alive");
+                    boolean isAlive = "1".equals(aliveVal);
+                    return (isAlive ? "Dies in " : "Spawns in ") + formatSecs(diff);
+                }
+            }
+        }
+
+        // ── Method 2: auto-summon-timer span text (e.g. "4m 58s") ────────────
+        String spanTimer = first(combined, "(?is)class=[\"'][^\"']*auto-summon-timer[^\"']*[\"'][^>]*>\\s*([^<]+)");
+        if (!empty(spanTimer)) return spanTimer.trim();
+
+        // ── Method 3: autoDieTimer div on battle page ─────────────────────────
+        String dieTimer = first(combined, "(?is)id=[\"']autoDieTimer[\"'][^>]*>\\s*([0-9:]+)");
+        if (!empty(dieTimer)) return "Dies in " + dieTimer.trim();
+
+        // ── Fallback: other common data attributes ────────────────────────────
         String raw = firstNonEmpty(
             attr(combined, "data-timer"),
             attr(combined, "data-respawn"),
             attr(combined, "data-respawn-time"),
             attr(combined, "data-countdown"),
-            attr(combined, "data-time-remaining"),
-            attr(combined, "data-end-time"),
-            first(combined, "(?i)(?:respawn|timer|countdown)[^0-9]{0,30}([0-9]{2,6})"),
-            first(combined, "(?i)(?:ends?\\s+in|time\\s+left)[^0-9]{0,20}([0-9]{1,2}:[0-9]{2}:[0-9]{2})")
+            attr(combined, "data-time-remaining")
         );
         if (!empty(raw)) {
-            if (raw.matches("[0-9]{2}:[0-9]{2}:[0-9]{2}") || raw.matches("[0-9]{1,2}:[0-9]{2}:[0-9]{2}")) return raw;
-            if (raw.matches("[0-9]{1,2}:[0-9]{2}")) return raw;
+            if (raw.matches("[0-9]{1,2}:[0-9]{2}:[0-9]{2}") || raw.matches("[0-9]{1,2}:[0-9]{2}")) return raw;
             long secs = parseLong(raw);
-            if (secs > 0 && secs < 86400 * 7) return formatSecs(secs);
+            if (secs > 0 && secs < 86400L * 7) return formatSecs(secs);
         }
-        String timeStr = firstNonEmpty(
-            first(combined, "(?i)(?:respawn|timer|ends?)[^<]{0,40}([0-9]{1,2}:[0-9]{2}:[0-9]{2})"),
-            first(combined, "(?i)class=[\"'][^\"']*(?:timer|countdown)[^\"']*[\"'][^>]*>\\s*([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)"),
-            first(combined, "(?i)id=[\"'][^\"']*(?:timer|countdown)[^\"']*[\"'][^>]*>\\s*([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)")
-        );
-        return empty(timeStr) ? "" : timeStr;
+        return "";
     }
     private String formatSecs(long secs) {
         if (secs <= 0) return "";
