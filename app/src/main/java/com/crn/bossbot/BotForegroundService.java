@@ -253,33 +253,56 @@ public class BotForegroundService extends Service {
         // The wave page's data-next-ts for alive bosses = next spawn time (after cycle),
         // NOT the auto-die countdown. The real value is in the battle.php autoDieTimer div.
         for (Boss b : all) {
-            if (b.alive && !empty(b.monsterId)) {
-                try {
-                    String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
-                    // Step 1: extract the inner content of the autoDieTimer element
-                    // (handles nested tags like <span id="autoDieTimer"><span>05:23</span></span>)
-                    String timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
-                    if (empty(timerBlock)) {
-                        // Fallback: grab up to 100 chars after the opening tag
-                        timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
-                    }
-                    // Step 2: strip any inner HTML tags, then find the HH:MM:SS or MM:SS pattern
-                    String raw = empty(timerBlock) ? "" : first(timerBlock.replaceAll("<[^>]+>", " "), "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-                    if (!empty(raw)) {
-                        String[] tp = raw.trim().split(":");
-                        try {
-                            long secs = tp.length == 3
-                                ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
-                                : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
-                            b.timer = "Auto dies in " + formatSecs(secs);
-                            append("INFO", b.name + " auto-die: " + formatSecs(secs));
-                        } catch (NumberFormatException e2) {
-                            append("WARN", b.name + " auto-die parse failed for: " + raw);
-                        }
-                    }
-                } catch (Exception e) {
-                    append("ERROR", b.name + " auto-die fetch: " + e.getMessage());
+            if (!b.alive) continue;
+
+            // Log clearly when monsterId is missing so the issue is visible in logs
+            if (empty(b.monsterId)) {
+                append("WARN", b.name + " alive but monsterId empty — skipping timer fetch");
+                continue;
+            }
+
+            try {
+                String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
+
+                // Strategy 1: extract the inner content of the autoDieTimer element
+                // (handles nested tags like <span id="autoDieTimer"><span>05:23</span></span>)
+                String timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
+                if (empty(timerBlock)) {
+                    // Fallback: grab up to 100 chars after the opening tag
+                    timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
                 }
+
+                // Strip any inner HTML tags, then find the HH:MM:SS or MM:SS pattern
+                String raw = empty(timerBlock) ? "" : first(timerBlock.replaceAll("<[^>]+>", " "), "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+
+                // Strategy 2: text-level fallback — the page shows "AUTO DIES AFTER: 00:50:13"
+                // as visible text (reliable even if the div structure changes)
+                if (empty(raw)) {
+                    raw = first(battleHtml, "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                }
+
+                // Strategy 3: any HH:MM:SS looking value near "auto" or "die" in the page
+                if (empty(raw)) {
+                    String nearAuto = first(battleHtml, "(?is)(?:auto|die|timer)[^<]{0,80}([0-9]{2}:[0-9]{2}:[0-9]{2})");
+                    if (!empty(nearAuto)) raw = nearAuto;
+                }
+
+                if (!empty(raw)) {
+                    String[] tp = raw.trim().split(":");
+                    try {
+                        long secs = tp.length == 3
+                            ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
+                            : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
+                        b.timer = "Auto dies in " + formatSecs(secs);
+                        append("INFO", b.name + " auto-die: " + formatSecs(secs));
+                    } catch (NumberFormatException e2) {
+                        append("WARN", b.name + " auto-die parse failed for: " + raw);
+                    }
+                } else {
+                    append("WARN", b.name + " auto-die: timer not found in battle page (monsterId=" + b.monsterId + ")");
+                }
+            } catch (Exception e) {
+                append("ERROR", b.name + " auto-die fetch: " + e.getMessage());
             }
         }
         return all;
@@ -338,7 +361,9 @@ public class BotForegroundService extends Service {
             if (b.alive && live != null) {
                 b.monsterId = firstNonEmpty(
                     attr(live,"data-monster-id"), attr(live,"data-id"),
-                    first(live,"battle\\.php\\?(?:[^\"'<>]*&)?id=([0-9]+)"),
+                    // Handle battle.php?id=123 AND battle.php?gate=3&wave=8&id=123 etc.
+                    first(live,"battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)"),
+                    first(live,"[?&]id=([0-9]+)"),
                     first(live,"(?:monster_id|monsterId)[^0-9]{0,20}(\\d+)")
                 );
                 b.battleId = firstNonEmpty(
@@ -356,7 +381,8 @@ public class BotForegroundService extends Service {
             // (covers cases where monster-card had no data-monster-id and live was null)
             if (b.alive && empty(b.monsterId))
                 b.monsterId = firstNonEmpty(
-                    first(summon, "battle\\.php\\?(?:[^\"'<>]*&)?id=([0-9]+)"),
+                    first(summon, "battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)"),
+                    first(summon, "[?&]id=([0-9]+)"),
                     attr(summon, "data-monster-id"), attr(summon, "data-id")
                 );
 
@@ -381,7 +407,9 @@ public class BotForegroundService extends Service {
                 b.key     = category.key + ":" + rootKey;
                 b.alive   = !"1".equals(attr(live,"data-dead"));
                 b.status  = b.alive ? "ALIVE" : "DEAD";
-                b.monsterId = firstNonEmpty(attr(live,"data-monster-id"), attr(live,"data-id"));
+                b.monsterId = firstNonEmpty(attr(live,"data-monster-id"), attr(live,"data-id"),
+                    first(live,"battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)"),
+                    first(live,"[?&]id=([0-9]+)"));
                 b.battleId  = attr(live,"data-battle-id");
                 b.image     = first(live,"<img[^>]+src=[\"']([^\"']+)[\"']");
                 b.damage    = parseLong(firstNonEmpty(attr(live,"data-userdmg"),attr(live,"data-user-dmg"),attr(live,"data-damage")));
