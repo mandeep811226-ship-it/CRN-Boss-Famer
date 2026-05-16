@@ -43,6 +43,7 @@ public class MainActivity extends Activity {
     private WebView loginWeb;
     private String currentScreen = "main";
     private int activeTab = 0;           // 0 = ALL, 1..N = wave tabs, last = LOGS
+    private ScrollView mainScrollView;   // kept to preserve scroll position on soft refresh
 
     // ── Debounce handler — prevents tab/bar "dancing" on rapid updates ──────────
     private final android.os.Handler refreshHandler = new android.os.Handler(android.os.Looper.getMainLooper());
@@ -142,9 +143,15 @@ public class MainActivity extends Activity {
 
     /** Called by the broadcast receiver after debounce — soft-rebuilds UI */
     private void doRefreshMain() {
+        // Save scroll position so the panel doesn't jump back to top on every scan
+        final int savedScroll = mainScrollView != null ? mainScrollView.getScrollY() : 0;
         bgRefresh = true;
         showMain();
         bgRefresh = false;
+        // Restore scroll position after rebuild
+        if (mainScrollView != null && savedScroll > 0) {
+            mainScrollView.post(() -> mainScrollView.scrollTo(0, savedScroll));
+        }
     }
 
     // ── Header ─────────────────────────────────────────────────────────────────
@@ -407,8 +414,20 @@ public class MainActivity extends Activity {
         host.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
         host.addView(buildBottomNav(), new LinearLayout.LayoutParams(-1, -2));
 
+        mainScrollView = scroll;   // save ref so doRefreshMain() can restore scroll position
         shell.addView(host, new LinearLayout.LayoutParams(-1, 0, 1));
-        switchTab(activeTab);
+
+        // On background refresh, just show/hide panels without any scroll animation
+        if (bgRefresh) {
+            int total = allWaveTabs.size() + 2;
+            for (int i = 0; i < total; i++) {
+                View panel = getPanelAt(i);
+                if (panel != null) panel.setVisibility(i == activeTab ? View.VISIBLE : View.GONE);
+            }
+            highlightTab(activeTab);
+        } else {
+            switchTab(activeTab);
+        }
     }
 
     // ── ALL overview panel ─────────────────────────────────────────────────────
@@ -603,13 +622,23 @@ public class MainActivity extends Activity {
             return panel;
         }
 
-        // 2-column grid
-        GridLayout grid = new GridLayout(this);
-        grid.setColumnCount(2);
-        for (String[] p : bosses) {
-            grid.addView(buildBossCard(p), bossCardLp());
+        // Paired rows — gives each card true WRAP_CONTENT height (no GridLayout row-height equalisation)
+        for (int i = 0; i < bosses.size(); i += 2) {
+            LinearLayout pair = row(0);
+            LinearLayout.LayoutParams cardLp1 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            cardLp1.setMargins(dp(4), dp(4), dp(2), dp(4));
+            pair.addView(buildBossCard(bosses.get(i)), cardLp1);
+            if (i + 1 < bosses.size()) {
+                LinearLayout.LayoutParams cardLp2 = new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+                cardLp2.setMargins(dp(2), dp(4), dp(4), dp(4));
+                pair.addView(buildBossCard(bosses.get(i + 1)), cardLp2);
+            } else {
+                // Filler so the lone last card keeps its half-width
+                View filler = new View(this);
+                pair.addView(filler, new LinearLayout.LayoutParams(0, 0, 1f));
+            }
+            panel.addView(pair, lpW(-1));
         }
-        panel.addView(grid, lpW(-1));
         return panel;
     }
 
@@ -700,15 +729,6 @@ public class MainActivity extends Activity {
         dmgTv.setSingleLine(true);
         r2.addView(dmgTv, lp0(1));
 
-        // Timer — show computed countdown, or "Alive" fallback for live bosses with no timer yet
-        String timerDisplay = (timer != null && !timer.isEmpty()) ? timer
-                : (alive ? "Alive" : "");
-        if (!timerDisplay.isEmpty()) {
-            TextView timerTv = txt("⏱ " + timerDisplay, 9, false,
-                    (timer != null && !timer.isEmpty()) ? C_AMBER : C_MUTED);
-            timerTv.setSingleLine(true);
-            r2.addView(timerTv, lpWH(-2, -2));
-        }
         c.addView(r2);
 
         // row 3: cap label + cap chip (bigger, tappable to edit)
@@ -761,6 +781,18 @@ public class MainActivity extends Activity {
             presets.addView(pb);
         }
         c.addView(presets);
+
+        // Timer row — below presets, matches game wording ("Spawns in …" / "Auto dies in …")
+        String timerDisplay = (timer != null && !timer.isEmpty()) ? timer : (alive ? "⏳ Alive" : "");
+        if (!timerDisplay.isEmpty()) {
+            LinearLayout timerRow = row(Gravity.CENTER_VERTICAL);
+            timerRow.setPadding(0, dp(6), 0, dp(2));
+            boolean hasCountdown = timer != null && !timer.isEmpty();
+            TextView timerTv = txt("⏱ " + timerDisplay, 10, false, hasCountdown ? C_AMBER : C_MUTED);
+            timerTv.setSingleLine(true);
+            timerRow.addView(timerTv, lp0(1));
+            c.addView(timerRow);
+        }
 
         return c;
     }
@@ -1393,22 +1425,24 @@ public class MainActivity extends Activity {
     //  HELPERS — views
     // ═══════════════════════════════════════════════════════════════════════════
 
+    /**
+     * Weight-based progress bar — no post() deferred sizing, so it never animates or "dances"
+     * on UI rebuilds triggered by background scans.
+     */
     private View buildProgressBar(float pct, int width, int height) {
-        FrameLayout wrap = new FrameLayout(this);
-        LinearLayout.LayoutParams wlp = lpW(width < 0 ? -1 : width);
+        pct = Math.max(0f, Math.min(1f, pct));
+
+        LinearLayout bar = new LinearLayout(this);
+        bar.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams wlp = new LinearLayout.LayoutParams(width < 0 ? -1 : width, height);
         wlp.setMargins(0, dp(4), 0, 0);
-        wrap.setLayoutParams(wlp);
+        bar.setLayoutParams(wlp);
 
-        View track = new View(this);
-        track.setBackgroundColor(Color.argb(40, 255, 255, 255));
-        GradientDrawable td = new GradientDrawable();
-        td.setColor(Color.argb(40, 255, 255, 255));
-        td.setCornerRadius(dp(2));
-        track.setBackground(td);
-        wrap.addView(track, new FrameLayout.LayoutParams(-1, height));
+        GradientDrawable trackBg = new GradientDrawable();
+        trackBg.setColor(Color.argb(40, 255, 255, 255));
+        trackBg.setCornerRadius(dp(2));
 
-        if (pct > 0) {
-            View fill = new View(this);
+        if (pct > 0f) {
             GradientDrawable fd = new GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
                 pct >= 1f
@@ -1416,22 +1450,16 @@ public class MainActivity extends Activity {
                     : new int[]{ C_BLUE, C_ACCENT }
             );
             fd.setCornerRadius(dp(2));
+            View fill = new View(this);
             fill.setBackground(fd);
-            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams((int)(pct * (width < 0 ? 9999 : width)), height);
-            if (width < 0) {
-                // use weight trick: post to measure
-                fill.setTag(pct);
-                wrap.addView(fill, new FrameLayout.LayoutParams(-1, height));
-                wrap.post(() -> {
-                    int w = wrap.getWidth();
-                    fill.getLayoutParams().width = (int)(((Float) fill.getTag()) * w);
-                    fill.requestLayout();
-                });
-            } else {
-                wrap.addView(fill, flp);
-            }
+            bar.addView(fill, new LinearLayout.LayoutParams(0, height, pct));
         }
-        return wrap;
+        if (pct < 1f) {
+            View track = new View(this);
+            track.setBackground(trackBg);
+            bar.addView(track, new LinearLayout.LayoutParams(0, height, 1f - pct));
+        }
+        return bar;
     }
 
     private View emptyCard(String msg) {
