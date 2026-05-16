@@ -404,8 +404,13 @@ public class MainActivity extends Activity {
 
         List<String[]> lines = parseBossLines(sp.getString("last_bosses", ""));
 
+        if (!isConnected()) {
+            panel.addView(buildConnectBanner());
+            return panel;
+        }
+
         if (lines.isEmpty()) {
-            panel.addView(emptyCard("No scan yet — start the bot after login."));
+            panel.addView(emptyCard("No scan data yet.\nTap ▶ Start below to begin scanning bosses."));
             return panel;
         }
 
@@ -430,6 +435,57 @@ public class MainActivity extends Activity {
             }
         }
         return panel;
+    }
+
+    /** Prominent banner shown on the ALL panel when the user isn't logged in */
+    private View buildConnectBanner() {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(20), dp(28), dp(20), dp(24));
+        card.setBackground(roundRect(Color.parseColor("#0d1e36"), dp(14),
+                Color.argb(180, 0, 229, 200)));
+        LinearLayout.LayoutParams lp = lpW(-1);
+        lp.setMargins(0, dp(12), 0, 0);
+        card.setLayoutParams(lp);
+
+        // Icon
+        TextView icon = txt("🔐", 34, false, Color.WHITE);
+        icon.setGravity(Gravity.CENTER);
+        card.addView(icon);
+
+        // Title
+        TextView title = txt("Not Connected", 16, true, Color.WHITE);
+        title.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams tlp = lpW(-1);
+        tlp.setMargins(0, dp(10), 0, dp(6));
+        title.setLayoutParams(tlp);
+        card.addView(title);
+
+        // Body
+        TextView body = txt(
+            "Log in to demonicscans.org to start using the bot.\nAfter login, tap ▶ Start to begin scanning bosses.",
+            12, false, C_TEXT2);
+        body.setGravity(Gravity.CENTER);
+        body.setLineSpacing(dp(2), 1f);
+        card.addView(body);
+
+        // Login button
+        TextView loginBtn = txt("🔑  Log In Now", 13, true, Color.parseColor("#03090f"));
+        loginBtn.setGravity(Gravity.CENTER);
+        loginBtn.setPadding(dp(28), dp(12), dp(28), dp(12));
+        GradientDrawable btnBg = new GradientDrawable();
+        btnBg.setColor(C_ACCENT);
+        btnBg.setCornerRadius(dp(10));
+        loginBtn.setBackground(btnBg);
+        loginBtn.setOnClickListener(v -> showLogin());
+        LinearLayout.LayoutParams blp = lpWH(-2, -2);
+        blp.setMargins(0, dp(18), 0, 0);
+        blp.gravity = Gravity.CENTER_HORIZONTAL;
+        loginBtn.setLayoutParams(blp);
+        card.addView(loginBtn);
+
+        return card;
     }
 
     private View buildSectionHeader(String label, String pip, boolean hasAlive) {
@@ -1364,12 +1420,12 @@ public class MainActivity extends Activity {
     private View emptyCard(String msg) {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
-        c.setPadding(dp(14), dp(16), dp(14), dp(16));
-        c.setBackground(roundRect(C_CARD, dp(10), C_BORDER2));
+        c.setPadding(dp(14), dp(18), dp(14), dp(18));
+        c.setBackground(roundRect(Color.parseColor("#0d1e36"), dp(12), C_BORDER2));
         LinearLayout.LayoutParams lp = lpW(-1);
-        lp.setMargins(0, dp(6), 0, 0);
+        lp.setMargins(0, dp(8), 0, 0);
         c.setLayoutParams(lp);
-        TextView t = txt(msg, 13, false, C_MUTED);
+        TextView t = txt(msg, 13, false, C_TEXT2);
         t.setGravity(Gravity.CENTER);
         c.addView(t);
         return c;
@@ -1398,6 +1454,7 @@ public class MainActivity extends Activity {
     private View divider() {
         View d = new View(this);
         d.setBackgroundColor(C_BORDER);
+        d.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(1)));
         return d;
     }
 
