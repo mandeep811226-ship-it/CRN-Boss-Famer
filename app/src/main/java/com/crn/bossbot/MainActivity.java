@@ -792,12 +792,22 @@ public class MainActivity extends Activity {
         c.addView(presets);
 
         // Timer row — below presets, matches game wording ("Spawns in …" / "Auto dies in …")
-        String timerDisplay = (timer != null && !timer.isEmpty()) ? timer : (alive ? "⏳ Alive" : "");
-        if (!timerDisplay.isEmpty()) {
+        boolean hasAutoTimer = timer != null && !timer.isEmpty();
+        if (alive || hasAutoTimer) {
             LinearLayout timerRow = row(Gravity.CENTER_VERTICAL);
             timerRow.setPadding(0, dp(6), 0, dp(2));
-            boolean hasCountdown = timer != null && !timer.isEmpty();
-            TextView timerTv = txt("⏱ " + timerDisplay, 10, false, hasCountdown ? C_AMBER : C_MUTED);
+            // For alive bosses: combine "⏳ Alive" with the auto-die timer when available
+            // e.g. "⏳ Alive - Auto dies in 05:23" or just "⏳ Alive"
+            // For dead bosses with a spawn timer: show the timer text directly
+            String timerDisplay;
+            if (alive && hasAutoTimer) {
+                timerDisplay = "⏳ Alive - " + timer;
+            } else if (alive) {
+                timerDisplay = "⏳ Alive";
+            } else {
+                timerDisplay = timer;
+            }
+            TextView timerTv = txt(timerDisplay, 10, false, hasAutoTimer ? C_AMBER : C_MUTED);
             timerTv.setSingleLine(true);
             timerRow.addView(timerTv, lp0(1));
             c.addView(timerRow);
