@@ -21,6 +21,9 @@ public class BotForegroundService extends Service {
     public static final String ACTION_STATUS     = "com.crn.bossbot.STATUS";
     public static final String ACTION_CLEAR_LOGS = "CLEAR_LOGS";
     public static final String ACTION_SCAN_ONCE  = "SCAN_ONCE";
+    public static final String ACTION_RELOAD_WAVES = "RELOAD_WAVES";
+
+    private static final String PREF_CUSTOM_WAVES = "custom_waves_json";
 
     private static final int    NOTIF_ID  = 100;
     private static final String CH_MAIN   = "crn_java_main_visible_v2";
@@ -52,16 +55,35 @@ public class BotForegroundService extends Service {
     private volatile String notifBossName = "";
     private volatile long   notifDamage   = 0L, notifCap = 0L;
 
-    // ── Categories  ────────────────────────────────────────────────────────────
-    // Add more entries here as new waves are released.
+    // ── Category class ─────────────────────────────────────────────────────────
     static class Category { final String key, label, url; Category(String k,String l,String u){key=k;label=l;url=u;} }
 
-    private final Category[] categories = new Category[]{
+    // ── Hardcoded built-in waves ───────────────────────────────────────────────
+    private static final Category[] BUILTIN_CATEGORIES = {
         new Category("grakthar", "Grakthar",  BASE + "/active_wave.php?gate=3&wave=8"),
         new Category("olympus",  "Olympus",   BASE + "/active_wave.php?gate=5&wave=9"),
-        new Category("olympus2", "Olympus2",  BASE + "/active_wave.php?gate=5&wave=10"),
-        new Category("olympus3", "Olympus3",  BASE + "/active_wave.php?gate=5&wave=11"),
+        new Category("hermes", "Hermes",  BASE + "/active_wave.php?gate=5&wave=10"),
     };
+
+    /**
+     * Builds the full category list: builtin + user-added custom waves.
+     * Called fresh on every scan loop so new waves added by the user
+     * are picked up immediately without restarting the service.
+     */
+    private Category[] buildCategories() {
+        List<Category> list = new ArrayList<>(Arrays.asList(BUILTIN_CATEGORIES));
+        String raw = sp.getString(PREF_CUSTOM_WAVES, "");
+        if (raw != null && !raw.isEmpty()) {
+            for (String line : raw.split("\n")) {
+                String[] parts = line.split("\\|", -1);
+                // parts: prefKey | label | url | emoji
+                if (parts.length >= 3 && !empty(parts[2])) {
+                    list.add(new Category(parts[0], parts[1], parts[2]));
+                }
+            }
+        }
+        return list.toArray(new Category[0]);
+    }
 
     // ── Data classes ───────────────────────────────────────────────────────────
     static class Boss {
@@ -104,9 +126,14 @@ public class BotForegroundService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? ACTION_START : intent.getAction();
-        if (ACTION_STOP.equals(action))       { stopBot(); return START_NOT_STICKY; }
-        if (ACTION_CLEAR_LOGS.equals(action)) { clearLogs(); return running ? START_STICKY : START_NOT_STICKY; }
-        if (ACTION_SCAN_ONCE.equals(action))  { scanOnceAsync(); return running ? START_STICKY : START_NOT_STICKY; }
+        if (ACTION_STOP.equals(action))         { stopBot(); return START_NOT_STICKY; }
+        if (ACTION_CLEAR_LOGS.equals(action))   { clearLogs(); return running ? START_STICKY : START_NOT_STICKY; }
+        if (ACTION_SCAN_ONCE.equals(action))    { scanOnceAsync(); return running ? START_STICKY : START_NOT_STICKY; }
+        if (ACTION_RELOAD_WAVES.equals(action)) {
+            // Custom waves are read fresh on every scan via buildCategories() — nothing extra needed
+            append("INFO", "Wave list reloaded — will take effect on next scan.");
+            return running ? START_STICKY : START_NOT_STICKY;
+        }
         startForeground(NOTIF_ID, notification("CRN Boss Bot", "Starting engine…", false));
         startBot();
         return START_STICKY;
@@ -214,7 +241,8 @@ public class BotForegroundService extends Service {
     // ── Fetch & parse ──────────────────────────────────────────────────────────
     private List<Boss> fetchBosses() throws Exception {
         List<Boss> all = new ArrayList<>();
-        for (Category c : categories) {
+        // buildCategories() is called fresh every scan — picks up user-added waves immediately
+        for (Category c : buildCategories()) {
             boolean catEnabled = sp.getBoolean("enable_" + c.key, true);
             String html = get(c.url, c.url);
             List<Boss> parsed = parseBosses(html, c, catEnabled);
