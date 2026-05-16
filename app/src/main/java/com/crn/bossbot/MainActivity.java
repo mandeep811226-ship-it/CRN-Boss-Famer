@@ -44,16 +44,9 @@ public class MainActivity extends Activity {
     private String currentScreen = "main";
     private int activeTab = 0;           // 0 = ALL, 1..N = wave tabs, last = LOGS
 
-    // ── Debounce UI rebuilds so broadcasts don't cause constant dancing ─────────
-    private final Handler uiHandler = new Handler(Looper.getMainLooper());
-    private final Runnable uiRefreshRunnable = () -> { if ("main".equals(currentScreen)) showMain(); };
-
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
-            if ("main".equals(currentScreen)) {
-                uiHandler.removeCallbacks(uiRefreshRunnable);
-                uiHandler.postDelayed(uiRefreshRunnable, 1500);
-            }
+            if ("main".equals(currentScreen)) refreshMainUi();
         }
     };
 
@@ -93,7 +86,6 @@ public class MainActivity extends Activity {
               .putBoolean("auto_potion", true)
               .putString("skill_id", "-4")
               .putString("scan_interval", "60")
-              .putString("cap_default", "2m")
               .apply();
         }
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -111,15 +103,7 @@ public class MainActivity extends Activity {
         requestInitialScanOnce();
     }
 
-    @Override protected void onResume()  {
-        super.onResume();
-        IntentFilter filter = new IntentFilter(BotForegroundService.ACTION_STATUS);
-        if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(receiver, filter, RECEIVER_NOT_EXPORTED);
-        } else {
-            registerReceiver(receiver, filter);
-        }
-    }
+    @Override protected void onResume()  { super.onResume();  registerReceiver(receiver, new IntentFilter(BotForegroundService.ACTION_STATUS), RECEIVER_NOT_EXPORTED); }
     @Override protected void onPause()   { try { unregisterReceiver(receiver); } catch (Exception ignored) {} super.onPause(); }
     @Override public void onBackPressed(){ if (!"main".equals(currentScreen)) showMain(); else super.onBackPressed(); }
 
@@ -219,6 +203,7 @@ public class MainActivity extends Activity {
             strip.addView(cell, lp);
         }
 
+        strip.addView(divider());  // bottom line
         View wrap = new LinearLayout(this);
         ((LinearLayout)wrap).setOrientation(LinearLayout.VERTICAL);
         ((LinearLayout)wrap).addView(strip, lpW(-1));
@@ -416,9 +401,6 @@ public class MainActivity extends Activity {
     private LinearLayout buildAllPanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setLayoutParams(new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         List<String[]> lines = parseBossLines(sp.getString("last_bosses", ""));
 
@@ -522,9 +504,6 @@ public class MainActivity extends Activity {
     private LinearLayout buildWavePanel(String[] waveDef, List<String[]> allLines) {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setLayoutParams(new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         String key   = waveDef[0];
         String label = waveDef[1];
@@ -550,11 +529,7 @@ public class MainActivity extends Activity {
         panel.addView(subHead);
 
         if (bosses.isEmpty()) {
-            boolean botRunning = sp.getBoolean("global_enabled", false);
-            String emptyMsg = botRunning
-                ? "⌛ Scanning for bosses in " + label + "…"
-                : "No bosses found for " + label + " yet. Start the bot to scan.";
-            panel.addView(emptyCard(emptyMsg));
+            panel.addView(emptyCard("No bosses found for " + label + " yet."));
             return panel;
         }
 
@@ -572,7 +547,7 @@ public class MainActivity extends Activity {
         boolean anyOff = false;
         for (String[] p : bosses) {
             String bKey = norm(p[0]) + ":" + bossRootKey(p[1]);
-            if (!sp.getBoolean("boss_enabled_" + bKey, true)) { anyOff = true; break; }
+            if (!sp.getBoolean("boss_enabled_" + bKey, false)) { anyOff = true; break; }
         }
         boolean target = anyOff;
         SharedPreferences.Editor ed = sp.edit();
@@ -592,16 +567,22 @@ public class MainActivity extends Activity {
         String damage   = p.length > 3 ? p[3] : "0";
         String cap      = p.length > 4 ? p[4] : "0";
         String image    = p.length > 6 ? p[6] : "";
+        String timer    = p.length > 8 ? p[8] : "";
 
-        final String catKey  = norm(catLabel);
-        final String rootKey = bossRootKey(name);                    // ← phase-safe key
+        final String catKey  = (p.length > 7 && p[7] != null && !p[7].isEmpty()) ? p[7] : norm(catLabel);
+        final String rootKey = bossRootKey(name);
         final String prefKey = "boss_enabled_" + catKey + ":" + rootKey;
-        final boolean enabled = sp.getBoolean(prefKey, true);
-        boolean alive = "ALIVE".equalsIgnoreCase(status);
-        long dmgLong  = parseLong(damage);
-        long capLong  = parseLong(cap);
-        float pct     = capLong > 0 ? Math.min(1f, (float)dmgLong / capLong) : 0f;
+        final boolean enabled = sp.getBoolean(prefKey, false);
+        boolean alive  = "ALIVE".equalsIgnoreCase(status);
+        long dmgLong   = parseLong(damage);
+        long capLong   = parseLong(cap);
+        float pct      = capLong > 0 ? Math.min(1f, (float)dmgLong / capLong) : 0f;
         boolean capped = capLong > 0 && dmgLong >= capLong;
+
+        final String capKey    = "cap_" + catKey + "_" + rootKey;
+        final String rawCapPref = sp.getString(capKey, "");
+        boolean noCap          = rawCapPref.isEmpty() || parseLong(rawCapPref) == 0;
+        final String capDisplay = noCap ? "No Cap" : rawCapPref;
 
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
@@ -617,37 +598,28 @@ public class MainActivity extends Activity {
         c.setBackground(cardBg);
         if (Build.VERSION.SDK_INT >= 21) c.setElevation(dp(1));
 
-        // row 1: full boss name — uses a FrameLayout so the switch overlays
-        // top-right without stealing horizontal space from the name text.
-        FrameLayout nameArea = new FrameLayout(this);
-        LinearLayout.LayoutParams naLp = lpW(-1);
-        naLp.setMargins(0, 0, 0, dp(4));
-        nameArea.setLayoutParams(naLp);
-
-        TextView nameTv = txt(name, 11, true, Color.WHITE);
+        // row 1: boss name + toggle
+        LinearLayout r1 = row(Gravity.TOP);
+        TextView nameTv = txt(name, 12, true, Color.WHITE);
         nameTv.setSingleLine(false);
-        nameTv.setMaxLines(4);
-        // Right padding so long names don't slide under the switch thumb
-        nameTv.setPadding(0, dp(2), dp(44), 0);
-        nameArea.addView(nameTv, new FrameLayout.LayoutParams(-1, -2));
+        nameTv.setMaxLines(3);
+        r1.addView(nameTv, lp0(1));
 
         Switch sw = new Switch(this);
         sw.setChecked(enabled);
-        sw.setScaleX(0.70f);
-        sw.setScaleY(0.70f);
+        sw.setScaleX(0.72f);
+        sw.setScaleY(0.72f);
         sw.setPadding(0, 0, 0, 0);
         sw.setOnCheckedChangeListener((btn, val) -> {
             sp.edit().putBoolean(prefKey, val).apply();
             cardBg.setAlpha(val ? 255 : 120);
         });
-        FrameLayout.LayoutParams swFlp = new FrameLayout.LayoutParams(-2, -2);
-        swFlp.gravity = Gravity.TOP | Gravity.END;
-        nameArea.addView(sw, swFlp);
-        c.addView(nameArea);
+        r1.addView(sw, lpWH(dp(46), dp(28)));
+        c.addView(r1);
 
-        // row 2: status pill + damage value
+        // row 2: status pill + damage value + timer
         LinearLayout r2 = row(Gravity.CENTER_VERTICAL);
-        r2.setPadding(0, dp(7), 0, dp(7));
+        r2.setPadding(0, dp(7), 0, dp(4));
 
         String displayStatus = ("WAITING".equalsIgnoreCase(status) || status.isEmpty()) ? "WAIT" : status.toUpperCase(Locale.US);
         int pillBg  = alive ? Color.argb(50, 0, 229, 200) : Color.argb(40, 60, 80, 110);
@@ -657,32 +629,65 @@ public class MainActivity extends Activity {
 
         TextView dmgTv = txt("  " + fmt(damage), 13, true, alive ? Color.WHITE : C_MUTED);
         dmgTv.setSingleLine(true);
-        r2.addView(dmgTv);
+        r2.addView(dmgTv, lp0(1));
+
+        if (!empty(timer)) {
+            TextView timerTv = txt("⏱ " + timer, 9, false, C_AMBER);
+            timerTv.setSingleLine(true);
+            r2.addView(timerTv, lpWH(-2, -2));
+        }
         c.addView(r2);
 
-        // row 3: cap label + cap chip (tappable to edit)
+        // row 3: cap label + cap chip (bigger, tappable to edit)
         LinearLayout r3 = row(Gravity.CENTER_VERTICAL);
+        r3.setPadding(0, 0, 0, dp(4));
         TextView capLbl = txt("Cap", 9, true, C_MUTED);
         if (Build.VERSION.SDK_INT >= 21) capLbl.setLetterSpacing(0.04f);
         r3.addView(capLbl, lp0(1));
 
-        final String capKey = "cap_" + catKey + "_" + rootKey;
-        final String capVal = sp.getString(capKey, fmt(cap));
-        TextView capChip = chip(capVal,
-            Color.argb(40, 59, 158, 255),
-            C_BLUE,
-            Color.argb(100, 59, 158, 255));
-        capChip.setPadding(dp(10), dp(3), dp(10), dp(3));
-        capChip.setOnClickListener(v -> editBossCap(catLabel, name, capVal));
+        TextView capChip = chip(capDisplay,
+            noCap ? Color.argb(40, 255, 176, 32)  : Color.argb(40, 59, 158, 255),
+            noCap ? C_AMBER                        : C_BLUE,
+            noCap ? Color.argb(120, 255, 176, 32)  : Color.argb(100, 59, 158, 255));
+        capChip.setTextSize(11);
+        capChip.setPadding(dp(14), dp(5), dp(14), dp(5));
+        capChip.setOnClickListener(v -> editBossCap(catKey, name, rawCapPref));
         r3.addView(capChip, lpWH(-2, -2));
         c.addView(r3);
 
         // progress bar + fraction
         c.addView(buildProgressBar(pct, -1, dp(3)));
 
-        TextView frac = txt(fmt(damage) + " / " + fmt(cap) + (capped ? " ✓" : ""), 9, false, C_MUTED);
-        frac.setPadding(0, dp(3), 0, 0);
+        String fracText = noCap
+            ? (fmt(damage) + " / No Cap")
+            : (fmt(damage) + " / " + fmt(cap) + (capped ? " ✓" : ""));
+        TextView frac = txt(fracText, 9, false, C_MUTED);
+        frac.setPadding(0, dp(3), 0, dp(4));
         c.addView(frac);
+
+        // preset damage cap buttons
+        LinearLayout presets = row(Gravity.CENTER_VERTICAL);
+        presets.setPadding(0, dp(2), 0, 0);
+        TextView presLbl = txt("Presets:", 8, false, C_MUTED);
+        presets.addView(presLbl);
+        for (String preset : new String[]{"1b", "3b", "5b"}) {
+            boolean isActive = preset.equals(rawCapPref);
+            TextView pb = chip(preset,
+                isActive ? Color.argb(60, 0, 229, 200) : Color.argb(20, 0, 229, 200),
+                isActive ? Color.WHITE                  : C_ACCENT,
+                isActive ? Color.argb(180, 0, 229, 200) : Color.argb(60, 0, 229, 200));
+            pb.setTextSize(9);
+            pb.setPadding(dp(9), dp(3), dp(9), dp(3));
+            LinearLayout.LayoutParams plp = lpWH(-2, -2);
+            plp.setMargins(dp(5), 0, 0, 0);
+            pb.setLayoutParams(plp);
+            pb.setOnClickListener(v -> {
+                sp.edit().putString(capKey, preset).apply();
+                showMain();
+            });
+            presets.addView(pb);
+        }
+        c.addView(presets);
 
         return c;
     }
@@ -691,9 +696,6 @@ public class MainActivity extends Activity {
     private LinearLayout buildLogsPanel() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setLayoutParams(new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT));
 
         // toolbar
         LinearLayout head = row(Gravity.CENTER_VERTICAL);
@@ -844,8 +846,8 @@ public class MainActivity extends Activity {
     // ═══════════════════════════════════════════════════════════════════════════
     //  CAP EDITOR
     // ═══════════════════════════════════════════════════════════════════════════
-    private void editBossCap(String catLabel, String name, String current) {
-        String key = "cap_" + norm(catLabel) + "_" + bossRootKey(name);
+    private void editBossCap(String catKey, String name, String current) {
+        String key = "cap_" + catKey + "_" + bossRootKey(name);
         final EditText input = new EditText(this);
         input.setSingleLine(true);
         input.setInputType(InputType.TYPE_CLASS_TEXT);
@@ -857,7 +859,7 @@ public class MainActivity extends Activity {
             .setView(input)
             .setPositiveButton("Save", (d, w) -> {
                 String v = input.getText().toString().trim();
-                if (v.isEmpty()) v = sp.getString("cap_default", "2m");
+                if (v.isEmpty()) v = "0";
                 sp.edit().putString(key, v).apply();
                 toast("Cap updated");
                 showMain();
@@ -958,7 +960,6 @@ public class MainActivity extends Activity {
 
         addSkillPicker(box);
         addEdit(box, "Scan interval (seconds)",                   "scan_interval");
-        addEdit(box, "Default damage cap  (1m / 500m / 1b)",     "cap_default");
         addEdit(box, "Asterion stamina threshold",                "asterion_stamina_threshold");
         addEdit(box, "LSP limit",                                 "lsp_limit");
         addEdit(box, "FSP limit",                                 "fsp_limit");
@@ -1320,18 +1321,20 @@ public class MainActivity extends Activity {
     // ═══════════════════════════════════════════════════════════════════════════
 
     private View buildProgressBar(float pct, int width, int height) {
-        // Use a weight-based LinearLayout so no post() callbacks are needed,
-        // which was the cause of the progress bar "dancing" on every UI refresh.
-        LinearLayout bar = new LinearLayout(this);
-        bar.setOrientation(LinearLayout.HORIZONTAL);
+        FrameLayout wrap = new FrameLayout(this);
         LinearLayout.LayoutParams wlp = lpW(width < 0 ? -1 : width);
         wlp.setMargins(0, dp(4), 0, 0);
-        bar.setLayoutParams(wlp);
+        wrap.setLayoutParams(wlp);
 
-        float fillWeight  = Math.min(Math.max(pct, 0f), 1f);
-        float emptyWeight = 1f - fillWeight;
+        View track = new View(this);
+        track.setBackgroundColor(Color.argb(40, 255, 255, 255));
+        GradientDrawable td = new GradientDrawable();
+        td.setColor(Color.argb(40, 255, 255, 255));
+        td.setCornerRadius(dp(2));
+        track.setBackground(td);
+        wrap.addView(track, new FrameLayout.LayoutParams(-1, height));
 
-        if (fillWeight > 0) {
+        if (pct > 0) {
             View fill = new View(this);
             GradientDrawable fd = new GradientDrawable(
                 GradientDrawable.Orientation.LEFT_RIGHT,
@@ -1341,19 +1344,21 @@ public class MainActivity extends Activity {
             );
             fd.setCornerRadius(dp(2));
             fill.setBackground(fd);
-            bar.addView(fill, new LinearLayout.LayoutParams(0, height, fillWeight));
+            FrameLayout.LayoutParams flp = new FrameLayout.LayoutParams((int)(pct * (width < 0 ? 9999 : width)), height);
+            if (width < 0) {
+                // use weight trick: post to measure
+                fill.setTag(pct);
+                wrap.addView(fill, new FrameLayout.LayoutParams(-1, height));
+                wrap.post(() -> {
+                    int w = wrap.getWidth();
+                    fill.getLayoutParams().width = (int)(((Float) fill.getTag()) * w);
+                    fill.requestLayout();
+                });
+            } else {
+                wrap.addView(fill, flp);
+            }
         }
-
-        if (emptyWeight > 0) {
-            View empty = new View(this);
-            GradientDrawable ed = new GradientDrawable();
-            ed.setColor(Color.argb(40, 255, 255, 255));
-            ed.setCornerRadius(dp(2));
-            empty.setBackground(ed);
-            bar.addView(empty, new LinearLayout.LayoutParams(0, height, emptyWeight));
-        }
-
-        return bar;
+        return wrap;
     }
 
     private View emptyCard(String msg) {
@@ -1393,8 +1398,6 @@ public class MainActivity extends Activity {
     private View divider() {
         View d = new View(this);
         d.setBackgroundColor(C_BORDER);
-        d.setLayoutParams(new LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT, dp(1)));
         return d;
     }
 
