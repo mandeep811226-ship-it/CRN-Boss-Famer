@@ -264,24 +264,31 @@ public class BotForegroundService extends Service {
             try {
                 String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
 
-                // Strategy 1: extract the inner content of the autoDieTimer element
-                // (handles nested tags like <span id="autoDieTimer"><span>05:23</span></span>)
+                // DEBUG: log a snippet around "autoDieTimer" so we can see exactly what the bot received
+                int dbgIdx = battleHtml.toLowerCase(Locale.US).indexOf("autodietimer");
+                if (dbgIdx >= 0) {
+                    int dbgS = Math.max(0, dbgIdx - 20);
+                    int dbgE = Math.min(battleHtml.length(), dbgIdx + 180);
+                    append("DEBUG", b.name + " snippet:[" + battleHtml.substring(dbgS, dbgE).replaceAll("\\s+", " ") + "]");
+                } else {
+                    append("DEBUG", b.name + " no autoDieTimer found. Page start:[" + compact(battleHtml.substring(0, Math.min(300, battleHtml.length()))) + "]");
+                }
+
+                // Strategy 1: extract content of the autoDieTimer element
                 String timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
                 if (empty(timerBlock)) {
-                    // Fallback: grab up to 100 chars after the opening tag
                     timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
                 }
 
-                // Strip any inner HTML tags, then find the HH:MM:SS or MM:SS pattern
+                // Strip any inner HTML tags, then find HH:MM:SS or MM:SS
                 String raw = empty(timerBlock) ? "" : first(timerBlock.replaceAll("<[^>]+>", " "), "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
 
-                // Strategy 2: text-level fallback — the page shows "AUTO DIES AFTER: 00:50:13"
-                // as visible text (reliable even if the div structure changes)
+                // Strategy 2: text-level fallback — page shows "AUTO DIES AFTER: 00:50:13"
                 if (empty(raw)) {
                     raw = first(battleHtml, "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
                 }
 
-                // Strategy 3: any HH:MM:SS looking value near "auto" or "die" in the page
+                // Strategy 3: any HH:MM:SS near "auto" or "die" or "timer"
                 if (empty(raw)) {
                     String nearAuto = first(battleHtml, "(?is)(?:auto|die|timer)[^<]{0,80}([0-9]{2}:[0-9]{2}:[0-9]{2})");
                     if (!empty(nearAuto)) raw = nearAuto;
@@ -295,7 +302,7 @@ public class BotForegroundService extends Service {
                             : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
                         b.timer = "Auto dies in " + formatSecs(secs);
                         append("INFO", b.name + " auto-die: " + formatSecs(secs));
-                    } catch (NumberFormatException e2) {
+                    } catch (NumberFormatException nfe) {
                         append("WARN", b.name + " auto-die parse failed for: " + raw);
                     }
                 } else {
