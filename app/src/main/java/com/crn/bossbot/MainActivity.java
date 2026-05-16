@@ -697,11 +697,18 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 21) c.setElevation(dp(1));
 
         // row 1: boss name + toggle
-        LinearLayout r1 = row(Gravity.TOP);
+        // FrameLayout gives nameTv a CONCRETE width (MATCH_PARENT − switch gutter)
+        // so Android never needs to guess the wrap height via the broken 2-pass
+        // weight measurement used by horizontal LinearLayout.
+        FrameLayout nameFrame = new FrameLayout(this);
         TextView nameTv = txt(name, 12, true, Color.WHITE);
         nameTv.setSingleLine(false);
-        nameTv.setEllipsize(null); // absolutely no truncation — full name must always be visible
-        r1.addView(nameTv, lp0(1));
+        FrameLayout.LayoutParams nameFLp = new FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.WRAP_CONTENT);
+        nameFLp.rightMargin = dp(50); // keep text clear of the switch on the right
+        nameTv.setLayoutParams(nameFLp);
+        nameFrame.addView(nameTv);
 
         Switch sw = new Switch(this);
         sw.setChecked(enabled);
@@ -712,8 +719,10 @@ public class MainActivity extends Activity {
             sp.edit().putBoolean(prefKey, val).apply();
             cardBg.setAlpha(val ? 255 : 120);
         });
-        r1.addView(sw, lpWH(dp(46), dp(28)));
-        c.addView(r1);
+        FrameLayout.LayoutParams swFLp = new FrameLayout.LayoutParams(
+            dp(46), dp(28), Gravity.TOP | Gravity.END);
+        nameFrame.addView(sw, swFLp);
+        c.addView(nameFrame);
 
         // row 2: status pill + damage value + timer
         LinearLayout r2 = row(Gravity.CENTER_VERTICAL);
