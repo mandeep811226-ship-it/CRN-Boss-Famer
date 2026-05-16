@@ -568,6 +568,7 @@ public class MainActivity extends Activity {
         TextView nameTv = txt(name, 12, true, C_TEXT);
         nameTv.setSingleLine(false);
         nameTv.setMaxLines(2);
+        nameTv.setEllipsize(android.text.TextUtils.TruncateAt.END);
         row.addView(nameTv, lp0(1));
 
         // damage + mini bar
@@ -699,8 +700,7 @@ public class MainActivity extends Activity {
         LinearLayout r1 = row(Gravity.TOP);
         TextView nameTv = txt(name, 12, true, Color.WHITE);
         nameTv.setSingleLine(false);
-        nameTv.setMaxLines(4);
-        nameTv.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        nameTv.setMaxLines(6);
         r1.addView(nameTv, lp0(1));
 
         Switch sw = new Switch(this);
@@ -1196,100 +1196,221 @@ public class MainActivity extends Activity {
         return "custom_" + norm(title) + "_" + System.currentTimeMillis() % 10000;
     }
 
-    /** Shows the Add Wave popup */
+    /** Shows the Add Wave popup — dark-themed, with live tab preview */
     private void showAddWaveDialog() {
-        // Container
+
+        // ── Root container ─────────────────────────────────────────────────────
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable rootBg = new GradientDrawable();
+        rootBg.setColor(C_SURFACE);
+        rootBg.setCornerRadius(dp(18));
+        rootBg.setStroke(dp(1), C_BORDER2);
+        root.setBackground(rootBg);
+        if (Build.VERSION.SDK_INT >= 21) root.setClipToOutline(true);
+
+        // ── Header with gradient ────────────────────────────────────────────────
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setPadding(dp(20), dp(18), dp(20), dp(14));
+        GradientDrawable headerBg = new GradientDrawable(
+            GradientDrawable.Orientation.BL_TR,
+            new int[]{ Color.parseColor("#061e2a"), Color.parseColor("#042818") }
+        );
+        float[] radii = { dp(18), dp(18), dp(18), dp(18), 0, 0, 0, 0 };
+        headerBg.setCornerRadii(radii);
+        header.setBackground(headerBg);
+
+        LinearLayout titleRow = row(Gravity.CENTER_VERTICAL);
+        TextView waveIcon2 = txt("🌊", 20, false, Color.WHITE);
+        titleRow.addView(waveIcon2);
+        TextView dlgTitle = txt("  Add New Wave", 16, true, Color.WHITE);
+        titleRow.addView(dlgTitle, lp0(1));
+        header.addView(titleRow);
+
+        TextView dlgSub = txt("Set up a new boss wave tab", 11, false, C_TEXT2);
+        dlgSub.setPadding(0, dp(3), 0, 0);
+        header.addView(dlgSub);
+        root.addView(header);
+
+        // ── Form body ──────────────────────────────────────────────────────────
         LinearLayout form = new LinearLayout(this);
         form.setOrientation(LinearLayout.VERTICAL);
-        form.setPadding(dp(20), dp(16), dp(20), dp(8));
-        form.setBackgroundColor(C_SURFACE);
+        form.setPadding(dp(18), dp(14), dp(18), dp(6));
 
-        // Emoji field
-        form.addView(txt("Tab Icon (emoji)", 11, true, C_MUTED));
+        // Live preview chip ─────────────────────────────────────────────────────
+        LinearLayout previewRow = row(Gravity.CENTER_VERTICAL);
+        previewRow.setPadding(0, 0, 0, dp(14));
+        TextView previewLbl = txt("Preview:", 10, true, C_MUTED);
+        previewRow.addView(previewLbl);
+
+        // This chip updates in real-time as user types
+        final TextView previewChip = chip("⚡  New Wave",
+            Color.argb(40, 0, 229, 200), C_ACCENT, Color.argb(120, 0, 229, 200));
+        previewChip.setTextSize(11);
+        previewChip.setPadding(dp(12), dp(6), dp(12), dp(6));
+        LinearLayout.LayoutParams pclp = lpWH(-2, -2);
+        pclp.setMargins(dp(8), 0, 0, 0);
+        previewChip.setLayoutParams(pclp);
+        previewRow.addView(previewChip);
+        form.addView(previewRow);
+
+        // ── Emoji field ────────────────────────────────────────────────────────
+        TextView emojiLbl = txt("🎯  Tab Icon (emoji)", 11, true, C_TEXT2);
+        form.addView(emojiLbl);
+
         EditText emojiInput = new EditText(this);
-        emojiInput.setHint("e.g.  ⚡  🔥  💀  🌊");
         emojiInput.setText("⚡");
         emojiInput.setTextColor(C_TEXT);
         emojiInput.setHintTextColor(C_MUTED);
+        emojiInput.setHint("e.g.  ⚔️  🔥  💀  🌊");
         emojiInput.setSingleLine(true);
-        emojiInput.setTextSize(16);
-        emojiInput.setBackground(inputBg());
-        emojiInput.setPadding(dp(10), dp(8), dp(10), dp(8));
-        LinearLayout.LayoutParams elp = lpW(-1);
-        elp.setMargins(0, dp(4), 0, dp(14));
-        emojiInput.setLayoutParams(elp);
+        emojiInput.setTextSize(18);
+        emojiInput.setBackground(waveFieldBg(false));
+        emojiInput.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams eilp = lpW(-1);
+        eilp.setMargins(0, dp(4), 0, dp(14));
+        emojiInput.setLayoutParams(eilp);
         form.addView(emojiInput);
 
-        // Title field
-        form.addView(txt("Wave Title", 11, true, C_MUTED));
+        // ── Title field ────────────────────────────────────────────────────────
+        TextView titleLbl = txt("📝  Wave Title", 11, true, C_TEXT2);
+        form.addView(titleLbl);
+
         EditText titleInput = new EditText(this);
         titleInput.setHint("e.g.  Oly W12");
         titleInput.setTextColor(C_TEXT);
         titleInput.setHintTextColor(C_MUTED);
         titleInput.setSingleLine(true);
         titleInput.setTextSize(14);
-        titleInput.setBackground(inputBg());
-        titleInput.setPadding(dp(10), dp(8), dp(10), dp(8));
-        LinearLayout.LayoutParams tlp = lpW(-1);
-        tlp.setMargins(0, dp(4), 0, dp(14));
-        titleInput.setLayoutParams(tlp);
+        titleInput.setBackground(waveFieldBg(false));
+        titleInput.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams tilp = lpW(-1);
+        tilp.setMargins(0, dp(4), 0, dp(14));
+        titleInput.setLayoutParams(tilp);
         form.addView(titleInput);
 
-        // URL field
-        form.addView(txt("Wave URL", 11, true, C_MUTED));
+        // ── URL field ──────────────────────────────────────────────────────────
+        TextView urlLbl = txt("🔗  Wave URL", 11, true, C_TEXT2);
+        form.addView(urlLbl);
+
         EditText urlInput = new EditText(this);
         urlInput.setHint("https://demonicscans.org/active_wave.php?gate=5&wave=12");
         urlInput.setTextColor(C_TEXT);
         urlInput.setHintTextColor(C_MUTED);
         urlInput.setSingleLine(true);
-        urlInput.setTextSize(12);
+        urlInput.setTextSize(11);
         urlInput.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        urlInput.setBackground(inputBg());
-        urlInput.setPadding(dp(10), dp(8), dp(10), dp(8));
-        LinearLayout.LayoutParams ulp = lpW(-1);
-        ulp.setMargins(0, dp(4), 0, dp(4));
-        urlInput.setLayoutParams(ulp);
+        urlInput.setBackground(waveFieldBg(false));
+        urlInput.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams uilp = lpW(-1);
+        uilp.setMargins(0, dp(4), 0, dp(4));
+        urlInput.setLayoutParams(uilp);
         form.addView(urlInput);
 
+        root.addView(form);
+
+        // ── Divider ────────────────────────────────────────────────────────────
+        root.addView(divider());
+
+        // ── Button row ─────────────────────────────────────────────────────────
+        LinearLayout btnRow = row(Gravity.CENTER_VERTICAL);
+        btnRow.setPadding(dp(16), dp(12), dp(16), dp(18));
+
+        TextView cancelBtn = txt("Cancel", 13, true, C_TEXT2);
+        cancelBtn.setGravity(Gravity.CENTER);
+        cancelBtn.setPadding(dp(16), dp(12), dp(16), dp(12));
+        cancelBtn.setBackground(roundRect(Color.TRANSPARENT, dp(10), C_BORDER2));
+        LinearLayout.LayoutParams cblp = new LinearLayout.LayoutParams(0, dp(46), 1f);
+        cancelBtn.setLayoutParams(cblp);
+
+        LinearLayout.LayoutParams ablp = new LinearLayout.LayoutParams(0, dp(46), 1.6f);
+        ablp.setMargins(dp(10), 0, 0, 0);
+        GradientDrawable addBtnBg = new GradientDrawable(
+            GradientDrawable.Orientation.LEFT_RIGHT,
+            new int[]{ Color.parseColor("#00c4a8"), C_ACCENT }
+        );
+        addBtnBg.setCornerRadius(dp(10));
+        TextView addBtn = txt("✦  Add Wave", 13, true, Color.parseColor("#03090f"));
+        addBtn.setGravity(Gravity.CENTER);
+        addBtn.setBackground(addBtnBg);
+        addBtn.setLayoutParams(ablp);
+
+        btnRow.addView(cancelBtn);
+        btnRow.addView(addBtn);
+        root.addView(btnRow);
+
+        // ── Live preview text watcher ──────────────────────────────────────────
+        android.text.TextWatcher previewWatcher = new android.text.TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int st, int c, int a) {}
+            @Override public void onTextChanged(CharSequence s, int st, int b, int c) {}
+            @Override public void afterTextChanged(android.text.Editable s) {
+                String e = emojiInput.getText().toString().trim();
+                String t = titleInput.getText().toString().trim();
+                if (e.isEmpty()) e = "⚡";
+                String preview = t.isEmpty() ? e + "  New Wave" : e + "  " + t;
+                previewChip.setText(preview);
+            }
+        };
+        emojiInput.addTextChangedListener(previewWatcher);
+        titleInput.addTextChangedListener(previewWatcher);
+
+        // ── Build and show dialog ──────────────────────────────────────────────
         AlertDialog dialog = new AlertDialog.Builder(this)
-            .setTitle("➕  Add New Wave")
-            .setView(form)
-            .setPositiveButton("Add Wave", null) // set manually to prevent auto-dismiss on error
-            .setNegativeButton("Cancel", null)
+            .setView(root)
             .create();
 
-        dialog.setOnShowListener(d -> {
-            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-                String emoji = emojiInput.getText().toString().trim();
-                String title = titleInput.getText().toString().trim();
-                String url   = urlInput.getText().toString().trim();
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setBackgroundDrawable(
+                new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        }
 
-                if (title.isEmpty()) { toast("Title is required"); return; }
-                if (url.isEmpty() || !url.startsWith("http")) { toast("Enter a valid URL"); return; }
-                if (emoji.isEmpty()) emoji = "⚡";
+        cancelBtn.setOnClickListener(v -> dialog.dismiss());
 
-                // Check for duplicate title
-                for (String[] w : loadCustomWaves()) {
-                    if (w[1].equalsIgnoreCase(title)) { toast("A wave with this title already exists"); return; }
-                }
+        addBtn.setOnClickListener(v -> {
+            String emoji = emojiInput.getText().toString().trim();
+            String title = titleInput.getText().toString().trim();
+            String url   = urlInput.getText().toString().trim();
 
-                String prefKey = customWavePrefKey(title);
-                // Enable the new wave by default
-                sp.edit().putBoolean("enable_" + prefKey, true).apply();
+            if (title.isEmpty()) { toast("Title is required"); return; }
+            if (url.isEmpty() || !url.startsWith("http")) { toast("Enter a valid URL"); return; }
+            if (emoji.isEmpty()) emoji = "⚡";
 
-                List<String[]> customs = loadCustomWaves();
-                customs.add(new String[]{ prefKey, title, url, emoji });
-                saveCustomWaves(customs);
+            for (String[] w : loadCustomWaves()) {
+                if (w[1].equalsIgnoreCase(title)) { toast("A wave with this title already exists"); return; }
+            }
 
-                // Switch to the new tab after rebuild
-                activeTab = 1 + allWaveTabs.size(); // will be last wave tab after rebuild
-                dialog.dismiss();
-                toast("Wave added!");
-                showMain();
-            });
+            String prefKey = customWavePrefKey(title);
+            sp.edit().putBoolean("enable_" + prefKey, true).apply();
+
+            List<String[]> customs = loadCustomWaves();
+            customs.add(new String[]{ prefKey, title, url, emoji });
+            saveCustomWaves(customs);
+
+            activeTab = 1 + allWaveTabs.size();
+            dialog.dismiss();
+            toast("Wave added!");
+            showMain();
         });
 
         dialog.show();
+
+        // Resize dialog to 92% screen width after show
+        if (dialog.getWindow() != null) {
+            dialog.getWindow().setLayout(
+                (int)(getResources().getDisplayMetrics().widthPixels * 0.92f),
+                android.view.WindowManager.LayoutParams.WRAP_CONTENT
+            );
+        }
+    }
+
+    /** Input field background for the Add Wave dialog */
+    private GradientDrawable waveFieldBg(boolean focused) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(C_CARD);
+        g.setCornerRadius(dp(10));
+        g.setStroke(dp(1), focused ? C_ACCENT : C_BORDER2);
+        return g;
     }
 
     /**
