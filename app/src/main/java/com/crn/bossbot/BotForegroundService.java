@@ -87,7 +87,7 @@ public class BotForegroundService extends Service {
 
     // ── Data classes ───────────────────────────────────────────────────────────
     static class Boss {
-        String categoryKey, categoryLabel, name, image, monsterId, battleId, key, status;
+        String categoryKey, categoryLabel, name, image, monsterId, battleId, key, status, timer;
         boolean alive, loot, enabled;
         long damage, cap;
     }
@@ -316,8 +316,9 @@ public class BotForegroundService extends Service {
                 if (empty(b.image)) b.image = first(live,"<img[^>]+src=[\"']([^\"']+)[\"']");
             }
 
+            b.timer   = parseTimerFromCards(summon, live != null ? live : "");
             b.cap     = capForBoss(b.name, category.key);
-            b.enabled = categoryEnabled && sp.getBoolean("boss_enabled_" + b.key, true);
+            b.enabled = categoryEnabled && sp.getBoolean("boss_enabled_" + b.key, false);
             list.add(b);
         }
 
@@ -338,8 +339,9 @@ public class BotForegroundService extends Service {
                 b.battleId  = attr(live,"data-battle-id");
                 b.image     = first(live,"<img[^>]+src=[\"']([^\"']+)[\"']");
                 b.damage    = parseLong(firstNonEmpty(attr(live,"data-userdmg"),attr(live,"data-user-dmg"),attr(live,"data-damage")));
+                b.timer     = parseTimerFromCards(live, "");
                 b.cap       = capForBoss(b.name, category.key);
-                b.enabled   = categoryEnabled && sp.getBoolean("boss_enabled_" + b.key, true);
+                b.enabled   = categoryEnabled && sp.getBoolean("boss_enabled_" + b.key, false);
                 list.add(b);
             }
         }
@@ -418,8 +420,9 @@ public class BotForegroundService extends Service {
             joinBattle(b.monsterId, userId);
             sleep(700 + new Random().nextInt(600));
 
+            int hitCount = 0;
             while (running && sp.getBoolean("global_enabled",false) && totalDamage < damageCap
-                           && sp.getBoolean("boss_enabled_" + b.key, true)) {
+                           && sp.getBoolean("boss_enabled_" + b.key, false)) {
 
                 Skill configuredSkill = skillFromId(parseInt(sp.getString("skill_id","0"),0));
                 Skill skill = configuredSkill;
@@ -491,7 +494,16 @@ public class BotForegroundService extends Service {
                 }
 
                 totalDamage += Math.max(0,hit);
-                if (hit <= 0) zeroDamageHits++; else zeroDamageHits = 0;
+                if (hit <= 0) zeroDamageHits++; else { zeroDamageHits = 0; hitCount++; }
+                if (hitCount > 0 && hitCount % 5 == 0) {
+                    long serverDmg = fetchDamage(b);
+                    if (serverDmg > totalDamage) {
+                        append("INFO", "Server sync: local=" + fmtn(totalDamage) + " server=" + fmtn(serverDmg) + " — correcting.");
+                        totalDamage = serverDmg; b.damage = totalDamage;
+                        damageByBoss.put(b.key, totalDamage); aliveDamageByBoss.put(b.key, totalDamage);
+                        notifDamage = totalDamage;
+                    }
+                }
                 b.damage = totalDamage;
                 damageByBoss.put(b.key, totalDamage);
                 aliveDamageByBoss.put(b.key, totalDamage);
@@ -690,6 +702,39 @@ public class BotForegroundService extends Service {
         try { String r=get(BATTLE_URL+"?id="+enc(b.monsterId),BATTLE_URL+"?id="+enc(b.monsterId)); long v=parseLong(firstNonEmpty(first(r,"(?i)data-userdmg=[\\\"']?([0-9,]+)"),first(r,"(?i)data-user-dmg=[\\\"']?([0-9,]+)"),first(r,"(?i)data-damage=[\\\"']?([0-9,]+)"),first(r,"(?i)\"totaldmg(?:e)?dealt\"\\s*:\\s*\"?([0-9,]+)"),first(r,"(?i)\"DAMAGE_DEALT\"\\s*:\\s*\"?([0-9,]+)"))); return v>0?v:b.damage; } catch(Exception e){append("ERROR",b.name+" damage recheck: "+e.getMessage()); return b.damage;}
     }
 
+    private String parseTimerFromCards(String card1, String card2) {
+        String combined = (card1 == null ? "" : card1) + (card2 == null ? "" : card2);
+        String raw = firstNonEmpty(
+            attr(combined, "data-timer"),
+            attr(combined, "data-respawn"),
+            attr(combined, "data-respawn-time"),
+            attr(combined, "data-countdown"),
+            attr(combined, "data-time-remaining"),
+            attr(combined, "data-end-time"),
+            first(combined, "(?i)(?:respawn|timer|countdown)[^0-9]{0,30}([0-9]{2,6})"),
+            first(combined, "(?i)(?:ends?\\s+in|time\\s+left)[^0-9]{0,20}([0-9]{1,2}:[0-9]{2}:[0-9]{2})")
+        );
+        if (!empty(raw)) {
+            if (raw.matches("[0-9]{2}:[0-9]{2}:[0-9]{2}") || raw.matches("[0-9]{1,2}:[0-9]{2}:[0-9]{2}")) return raw;
+            if (raw.matches("[0-9]{1,2}:[0-9]{2}")) return raw;
+            long secs = parseLong(raw);
+            if (secs > 0 && secs < 86400 * 7) return formatSecs(secs);
+        }
+        String timeStr = firstNonEmpty(
+            first(combined, "(?i)(?:respawn|timer|ends?)[^<]{0,40}([0-9]{1,2}:[0-9]{2}:[0-9]{2})"),
+            first(combined, "(?i)class=[\"'][^\"']*(?:timer|countdown)[^\"']*[\"'][^>]*>\\s*([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)"),
+            first(combined, "(?i)id=[\"'][^\"']*(?:timer|countdown)[^\"']*[\"'][^>]*>\\s*([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)")
+        );
+        return empty(timeStr) ? "" : timeStr;
+    }
+    private String formatSecs(long secs) {
+        if (secs <= 0) return "";
+        long h = secs / 3600, m = (secs % 3600) / 60, s = secs % 60;
+        if (h > 0) return h + "h " + m + "m";
+        if (m > 0) return m + "m " + s + "s";
+        return s + "s";
+    }
+
     // ── Skill helpers ──────────────────────────────────────────────────────────
     private Skill selectAffordableSkill(int stamina) { for(Skill s:SKILLS) if(effectiveCostForSkill(s)<=stamina) return s; return null; }
     private Skill skillFromId(int id) { for(Skill s:SKILLS) if(s.skill_id==id) return s; return SKILLS[SKILLS.length-1]; }
@@ -703,7 +748,7 @@ public class BotForegroundService extends Service {
     private long capForBoss(String bossName, String categoryKey) {
         String root = bossRootKey(bossName);
         String raw  = sp.getString("cap_" + categoryKey + "_" + root, "");
-        if (empty(raw)) raw = sp.getString("cap_default", "2000000");
+        if (empty(raw)) raw = "0";
         return parseCap(raw);
     }
     private long parseCap(String v) {
@@ -734,7 +779,7 @@ public class BotForegroundService extends Service {
             }
         }
         for (Boss b:bosses) {
-            String[] row=new String[]{b.categoryLabel,b.name,b.status,String.valueOf(b.damage),String.valueOf(b.cap),String.valueOf(b.enabled),nullToEmpty(b.image)};
+            String[] row=new String[]{b.categoryLabel,b.name,b.status,String.valueOf(b.damage),String.valueOf(b.cap),String.valueOf(b.enabled),nullToEmpty(b.image),nullToEmpty(b.categoryKey),nullToEmpty(b.timer)};
             merged.put((b.categoryLabel+":"+norm(b.name)).toLowerCase(Locale.US),row);
         }
         StringBuilder sb=new StringBuilder();
