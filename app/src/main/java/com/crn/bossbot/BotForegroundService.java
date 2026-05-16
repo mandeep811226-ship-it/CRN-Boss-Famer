@@ -718,7 +718,7 @@ public class BotForegroundService extends Service {
                 if (diff > 0 && diff < 86400L * 30) {
                     String aliveVal = attr(summon, "data-alive");
                     boolean isAlive = "1".equals(aliveVal);
-                    return (isAlive ? "Dies in " : "Spawns in ") + formatSecs(diff);
+                    return (isAlive ? "Auto dies in " : "Spawns in ") + formatSecs(diff);
                 }
             }
         }
