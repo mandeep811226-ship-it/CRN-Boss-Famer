@@ -326,6 +326,7 @@ public class BotForegroundService extends Service {
             if (b.alive && live != null) {
                 b.monsterId = firstNonEmpty(
                     attr(live,"data-monster-id"), attr(live,"data-id"),
+                    first(live,"battle\\.php\\?(?:[^\"'<>]*&)?id=([0-9]+)"),
                     first(live,"(?:monster_id|monsterId)[^0-9]{0,20}(\\d+)")
                 );
                 b.battleId = firstNonEmpty(
@@ -338,6 +339,14 @@ public class BotForegroundService extends Service {
                 ));
                 if (empty(b.image)) b.image = first(live,"<img[^>]+src=[\"']([^\"']+)[\"']");
             }
+
+            // Fallback: extract monsterId from the summon card's battle.php link
+            // (covers cases where monster-card had no data-monster-id and live was null)
+            if (b.alive && empty(b.monsterId))
+                b.monsterId = firstNonEmpty(
+                    first(summon, "battle\\.php\\?(?:[^\"'<>]*&)?id=([0-9]+)"),
+                    attr(summon, "data-monster-id"), attr(summon, "data-id")
+                );
 
             b.timer   = parseTimerFromCards(summon, live != null ? live : "");
             b.cap     = capForBoss(b.name, category.key);
