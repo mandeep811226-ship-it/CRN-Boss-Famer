@@ -256,14 +256,26 @@ public class BotForegroundService extends Service {
             if (b.alive && !empty(b.monsterId)) {
                 try {
                     String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
-                    String raw = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>\\s*([0-9:]+)");
+                    // Step 1: extract the inner content of the autoDieTimer element
+                    // (handles nested tags like <span id="autoDieTimer"><span>05:23</span></span>)
+                    String timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
+                    if (empty(timerBlock)) {
+                        // Fallback: grab up to 100 chars after the opening tag
+                        timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
+                    }
+                    // Step 2: strip any inner HTML tags, then find the HH:MM:SS or MM:SS pattern
+                    String raw = empty(timerBlock) ? "" : first(timerBlock.replaceAll("<[^>]+>", " "), "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
                     if (!empty(raw)) {
                         String[] tp = raw.trim().split(":");
-                        long secs = tp.length == 3
-                            ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
-                            : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
-                        b.timer = "Auto dies in " + formatSecs(secs);
-                        append("INFO", b.name + " auto-die: " + formatSecs(secs));
+                        try {
+                            long secs = tp.length == 3
+                                ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
+                                : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
+                            b.timer = "Auto dies in " + formatSecs(secs);
+                            append("INFO", b.name + " auto-die: " + formatSecs(secs));
+                        } catch (NumberFormatException e2) {
+                            append("WARN", b.name + " auto-die parse failed for: " + raw);
+                        }
                     }
                 } catch (Exception e) {
                     append("ERROR", b.name + " auto-die fetch: " + e.getMessage());
