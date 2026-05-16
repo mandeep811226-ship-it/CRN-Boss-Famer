@@ -631,7 +631,7 @@ public class MainActivity extends Activity {
         dmgTv.setSingleLine(true);
         r2.addView(dmgTv, lp0(1));
 
-        if (!empty(timer)) {
+        if (timer != null && !timer.isEmpty()) {
             TextView timerTv = txt("⏱ " + timer, 9, false, C_AMBER);
             timerTv.setSingleLine(true);
             r2.addView(timerTv, lpWH(-2, -2));
