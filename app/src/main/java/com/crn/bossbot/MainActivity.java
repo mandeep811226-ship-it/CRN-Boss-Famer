@@ -44,9 +44,18 @@ public class MainActivity extends Activity {
     private String currentScreen = "main";
     private int activeTab = 0;           // 0 = ALL, 1..N = wave tabs, last = LOGS
 
+    // ── Debounce handler — prevents tab/bar "dancing" on rapid updates ──────────
+    private final android.os.Handler refreshHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable refreshRunnable = this::doRefreshMain;
+    private boolean bgRefresh = false;   // true during a background (broadcast) refresh
+
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
-            if ("main".equals(currentScreen)) refreshMainUi();
+            if ("main".equals(currentScreen)) {
+                // Coalesce rapid-fire broadcasts into one rebuild 300 ms later
+                refreshHandler.removeCallbacks(refreshRunnable);
+                refreshHandler.postDelayed(refreshRunnable, 300);
+            }
         }
     };
 
@@ -131,9 +140,11 @@ public class MainActivity extends Activity {
         buildPanelHost(shell);   // panels + bottom nav sit inside a FrameLayout
     }
 
-    /** Lightweight refresh called by the broadcast receiver — rebuilds content only */
-    private void refreshMainUi() {
-        showMain();     // cheapest correct approach; all panels recreated in <1ms
+    /** Called by the broadcast receiver after debounce — soft-rebuilds UI */
+    private void doRefreshMain() {
+        bgRefresh = true;
+        showMain();
+        bgRefresh = false;
     }
 
     // ── Header ─────────────────────────────────────────────────────────────────
@@ -203,7 +214,6 @@ public class MainActivity extends Activity {
             strip.addView(cell, lp);
         }
 
-        strip.addView(divider());  // bottom line
         View wrap = new LinearLayout(this);
         ((LinearLayout)wrap).setOrientation(LinearLayout.VERTICAL);
         ((LinearLayout)wrap).addView(strip, lpW(-1));
@@ -345,7 +355,11 @@ public class MainActivity extends Activity {
         }
         tabBarScroll.post(() -> {
             View tab = tabBarInner.getChildAt(idx);
-            if (tab != null) tabBarScroll.smoothScrollTo(tab.getLeft(), 0);
+            if (tab != null) {
+                // Use instant scroll on background refresh to avoid the "dancing" effect
+                if (bgRefresh) tabBarScroll.scrollTo(tab.getLeft(), 0);
+                else tabBarScroll.smoothScrollTo(tab.getLeft(), 0);
+            }
         });
     }
 
@@ -643,8 +657,6 @@ public class MainActivity extends Activity {
         LinearLayout c = new LinearLayout(this);
         c.setOrientation(LinearLayout.VERTICAL);
         c.setPadding(dp(10), dp(10), dp(10), dp(9));
-        c.setMinimumHeight(dp(148));
-
         GradientDrawable cardBg = roundRect(
             alive ? Color.parseColor("#0a1e1c") : C_CARD,
             dp(12),
@@ -658,7 +670,8 @@ public class MainActivity extends Activity {
         LinearLayout r1 = row(Gravity.TOP);
         TextView nameTv = txt(name, 12, true, Color.WHITE);
         nameTv.setSingleLine(false);
-        nameTv.setMaxLines(3);
+        nameTv.setMaxLines(4);
+        nameTv.setEllipsize(android.text.TextUtils.TruncateAt.END);
         r1.addView(nameTv, lp0(1));
 
         Switch sw = new Switch(this);
@@ -687,8 +700,12 @@ public class MainActivity extends Activity {
         dmgTv.setSingleLine(true);
         r2.addView(dmgTv, lp0(1));
 
-        if (timer != null && !timer.isEmpty()) {
-            TextView timerTv = txt("⏱ " + timer, 9, false, C_AMBER);
+        // Timer — show computed countdown, or "Alive" fallback for live bosses with no timer yet
+        String timerDisplay = (timer != null && !timer.isEmpty()) ? timer
+                : (alive ? "Alive" : "");
+        if (!timerDisplay.isEmpty()) {
+            TextView timerTv = txt("⏱ " + timerDisplay, 9, false,
+                    (timer != null && !timer.isEmpty()) ? C_AMBER : C_MUTED);
             timerTv.setSingleLine(true);
             r2.addView(timerTv, lpWH(-2, -2));
         }
