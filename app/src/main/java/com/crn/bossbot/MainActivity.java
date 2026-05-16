@@ -700,7 +700,7 @@ public class MainActivity extends Activity {
         LinearLayout r1 = row(Gravity.TOP);
         TextView nameTv = txt(name, 12, true, Color.WHITE);
         nameTv.setSingleLine(false);
-        nameTv.setMaxLines(6);
+        nameTv.setEllipsize(null); // absolutely no truncation — full name must always be visible
         r1.addView(nameTv, lp0(1));
 
         Switch sw = new Switch(this);
@@ -1435,13 +1435,29 @@ public class MainActivity extends Activity {
                 saveCustomWaves(customs);
                 // Clean up boss prefs for this wave
                 SharedPreferences.Editor ed = sp.edit();
-                Map<String, ?> all = sp.getAll();
-                for (String key : all.keySet()) {
+                Map<String, ?> allPrefs = sp.getAll();
+                for (String key : allPrefs.keySet()) {
                     if (key.startsWith("boss_enabled_" + wave[0]) || key.startsWith("cap_" + wave[0])) {
                         ed.remove(key);
                     }
                 }
-                ed.remove("enable_" + wave[0]).apply();
+                ed.remove("enable_" + wave[0]);
+                // ── Remove this wave's bosses from last_bosses ─────────────────
+                // Without this, the ALL tab keeps showing deleted wave bosses
+                // until the service does the next full scan cycle.
+                String existing = sp.getString("last_bosses", "");
+                if (!existing.isEmpty()) {
+                    StringBuilder cleaned = new StringBuilder();
+                    for (String line : existing.split("\n")) {
+                        String[] parts = line.split("\\|", -1);
+                        // p[0] = categoryLabel — skip lines matching deleted wave's label
+                        if (parts.length > 0 && wave[1].equalsIgnoreCase(parts[0].trim())) continue;
+                        if (cleaned.length() > 0) cleaned.append("\n");
+                        cleaned.append(line);
+                    }
+                    ed.putString("last_bosses", cleaned.toString());
+                }
+                ed.apply();
                 activeTab = 0;
                 toast("Wave removed");
                 showMain();
