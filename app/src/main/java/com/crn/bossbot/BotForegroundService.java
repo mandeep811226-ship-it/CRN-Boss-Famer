@@ -264,48 +264,61 @@ public class BotForegroundService extends Service {
             try {
                 String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
 
-                // DEBUG: log a snippet around "autoDieTimer" so we can see exactly what the bot received
-                int dbgIdx = battleHtml.toLowerCase(Locale.US).indexOf("autodietimer");
-                if (dbgIdx >= 0) {
-                    int dbgS = Math.max(0, dbgIdx - 20);
-                    int dbgE = Math.min(battleHtml.length(), dbgIdx + 180);
-                    append("DEBUG", b.name + " snippet:[" + battleHtml.substring(dbgS, dbgE).replaceAll("\\s+", " ") + "]");
-                } else {
-                    append("DEBUG", b.name + " no autoDieTimer found. Page start:[" + compact(battleHtml.substring(0, Math.min(300, battleHtml.length()))) + "]");
-                }
-
-                // Strategy 1: extract content of the autoDieTimer element
-                String timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
-                if (empty(timerBlock)) {
-                    timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
-                }
-
-                // Strip any inner HTML tags, then find HH:MM:SS or MM:SS
-                String raw = empty(timerBlock) ? "" : first(timerBlock.replaceAll("<[^>]+>", " "), "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-
-                // Strategy 2: text-level fallback — page shows "AUTO DIES AFTER: 00:50:13"
-                if (empty(raw)) {
-                    raw = first(battleHtml, "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-                }
-
-                // Strategy 3: any HH:MM:SS near "auto" or "die" or "timer"
-                if (empty(raw)) {
-                    String nearAuto = first(battleHtml, "(?is)(?:auto|die|timer)[^<]{0,80}([0-9]{2}:[0-9]{2}:[0-9]{2})");
-                    if (!empty(nearAuto)) raw = nearAuto;
-                }
-
-                if (!empty(raw)) {
-                    String[] tp = raw.trim().split(":");
+                // Strategy 1 (BEST): window.AUTO_DIE_CFG = { nextDieMs: 1234567 }
+                // This is the authoritative server-set value in a <script> tag
+                String nextDieMsStr = first(battleHtml, "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
+                if (!empty(nextDieMsStr)) {
                     try {
-                        long secs = tp.length == 3
-                            ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
-                            : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
-                        b.timer = "Auto dies in " + formatSecs(secs);
-                        append("INFO", b.name + " auto-die: " + formatSecs(secs));
+                        long epochMs = Long.parseLong(nextDieMsStr.trim());
+                        long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
+                        if (secsLeft > 0 && secsLeft < 86400L * 7) {
+                            b.timer = "Auto dies in " + formatSecs(secsLeft);
+                            append("INFO", b.name + " auto-die (cfg): " + formatSecs(secsLeft));
+                        } else if (secsLeft <= 0) {
+                            b.timer = "Auto dies soon";
+                            append("INFO", b.name + " auto-die: imminent (nextDieMs in past)");
+                        }
                     } catch (NumberFormatException nfe) {
-                        append("WARN", b.name + " auto-die parse failed for: " + raw);
+                        append("WARN", b.name + " nextDieMs parse failed: " + nextDieMsStr);
                     }
-                } else {
+                }
+
+                // Strategy 2: autoDieTimer div — only valid when it shows real digits, not "--:--:--"
+                if (empty(b.timer)) {
+                    String timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
+                    if (empty(timerBlock))
+                        timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
+                    String raw = empty(timerBlock) ? "" : first(timerBlock.replaceAll("<[^>]+>", " "), "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                    if (!empty(raw)) {
+                        String[] tp = raw.trim().split(":");
+                        try {
+                            long secs = tp.length == 3
+                                ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
+                                : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
+                            b.timer = "Auto dies in " + formatSecs(secs);
+                            append("INFO", b.name + " auto-die (div): " + formatSecs(secs));
+                        } catch (NumberFormatException nfe) {
+                            append("WARN", b.name + " auto-die div parse failed: " + raw);
+                        }
+                    }
+                }
+
+                // Strategy 3: visible text "AUTO DIES AFTER: 00:50:13"
+                if (empty(b.timer)) {
+                    String raw = first(battleHtml, "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                    if (!empty(raw)) {
+                        String[] tp = raw.trim().split(":");
+                        try {
+                            long secs = tp.length == 3
+                                ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
+                                : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
+                            b.timer = "Auto dies in " + formatSecs(secs);
+                            append("INFO", b.name + " auto-die (text): " + formatSecs(secs));
+                        } catch (NumberFormatException nfe) { /* ignore */ }
+                    }
+                }
+
+                if (empty(b.timer)) {
                     append("WARN", b.name + " auto-die: timer not found in battle page (monsterId=" + b.monsterId + ")");
                 }
             } catch (Exception e) {
