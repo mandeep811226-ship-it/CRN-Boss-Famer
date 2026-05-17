@@ -1475,30 +1475,50 @@ public class MainActivity extends Activity {
         content.addView(slashRow, lpW(-1));
 
         // ── Class skill spinner (active when radioSkill selected) ────────────
-        content.addView(stratLabel("Class Skill"));
+        TextView classSkillLabel = stratLabel("Class Skill");
+        content.addView(classSkillLabel);
         List<SkillEntry> skills = loadSkillsFromPrefs();
-        Spinner classSkillSpinner = new Spinner(this);
+        Spinner classSkillSpinner = buildStyledSpinner();
         List<String> classSkillNames = new ArrayList<>();
         classSkillNames.add("None");
         for (SkillEntry s : skills)
             classSkillNames.add(s.name + "  (" + (s.mpCost > 0 ? s.mpCost + "MP" : s.stamCost + " STA") + ")");
         if (classSkillNames.size() == 1) classSkillNames.add("No skills — tap Rescan");
-        classSkillSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, classSkillNames));
+        classSkillSpinner.setAdapter(darkAdapter(classSkillNames));
         if (hasStrat && !existing.useStaminaSlash && existing.mainClassSkillId > 0)
             for (int i = 0; i < skills.size(); i++)
                 if (skills.get(i).skillId == existing.mainClassSkillId) classSkillSpinner.setSelection(i + 1);
         content.addView(classSkillSpinner, stratSpinnerLp());
 
-        // ── Toggle visibility/alpha based on radio selection ─────────────────
+        // ── Toggle: grey out the inactive section when radio changes ─────────
         final LinearLayout fSlashRow = slashRow;
         final TextView[] fSlashBtns = slashBtns;
         final Spinner fClassSkillSpinner = classSkillSpinner;
+        final TextView fClassSkillLabel = classSkillLabel;
         final RadioButton fRadioSlash = radioSlash;
+        final int[] fSelectedSlashIdx = selectedSlashIdx;
         Runnable applyToggle = new Runnable() {
             @Override public void run() {
                 boolean slashSel = fRadioSlash.isChecked();
+
+                // Slash row: full opacity + active buttons when slash selected
                 fSlashRow.setAlpha(slashSel ? 1f : 0.35f);
-                for (TextView b2 : fSlashBtns) b2.setEnabled(slashSel);
+                for (int j = 0; j < fSlashBtns.length; j++) {
+                    fSlashBtns[j].setEnabled(slashSel);
+                    if (slashSel) {
+                        boolean isSel = j == fSelectedSlashIdx[0];
+                        fSlashBtns[j].setBackground(roundRect(
+                            isSel ? C_ACCENT : C_SURFACE, dp(6),
+                            isSel ? C_ACCENT : C_BORDER2));
+                        fSlashBtns[j].setTextColor(isSel ? Color.parseColor("#03090f") : C_TEXT);
+                    } else {
+                        fSlashBtns[j].setBackground(roundRect(C_SURFACE, dp(6), C_BORDER2));
+                        fSlashBtns[j].setTextColor(C_MUTED);
+                    }
+                }
+
+                // Class skill section: dim label + spinner when slash selected
+                fClassSkillLabel.setAlpha(slashSel ? 0.35f : 1f);
                 fClassSkillSpinner.setAlpha(slashSel ? 0.35f : 1f);
                 fClassSkillSpinner.setEnabled(!slashSel);
             }
@@ -1517,11 +1537,11 @@ public class MainActivity extends Activity {
 
         // ── Periodic Buff ────────────────────────────────────────────────────
         content.addView(stratLabel("🔁  Periodic Buff (optional)"));
-        Spinner periodicSpinner = new Spinner(this);
+        Spinner periodicSpinner = buildStyledSpinner();
         List<String> periodicNames = new ArrayList<>();
         periodicNames.add("None");
-        for (SkillEntry s : skills) periodicNames.add(s.name);
-        periodicSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, periodicNames));
+        for (SkillEntry s : skills) periodicNames.add(s.name + "  (" + (s.mpCost > 0 ? s.mpCost + "MP" : s.stamCost + " STA") + ")");
+        periodicSpinner.setAdapter(darkAdapter(periodicNames));
         if (hasStrat && existing.periodicSkillId > 0)
             for (int i = 0; i < skills.size(); i++)
                 if (skills.get(i).skillId == existing.periodicSkillId) periodicSpinner.setSelection(i + 1);
@@ -1593,18 +1613,12 @@ public class MainActivity extends Activity {
             petSpinner.setSelection(0);
             selectedBuffIds.clear();
             renderBuffRows(buffsContainer, selectedBuffIds);
-            radioSlash.setChecked(true);
             selectedSlashIdx[0] = 0;
-            for (int j = 0; j < slashBtns.length; j++) {
-                boolean sel = j == 0;
-                slashBtns[j].setBackground(roundRect(sel ? C_ACCENT : C_SURFACE, dp(6), sel ? C_ACCENT : C_BORDER2));
-                slashBtns[j].setTextColor(sel ? Color.parseColor("#03090f") : C_TEXT);
-            }
+            radioSlash.setChecked(true);   // triggers applyToggle via listener
             classSkillSpinner.setSelection(0);
             repeatEdit.setText("");
             periodicSpinner.setSelection(0);
             periodicEveryEdit.setText("");
-            applyToggle.run();
             toast("Strategy cleared");
         });
 
@@ -1748,12 +1762,61 @@ public class MainActivity extends Activity {
     }
 
     // ── Layout helpers for strategy card ──────────────────────────────────────
+
+    /** Creates a dark-themed ArrayAdapter for use in strategy spinners. */
+    private ArrayAdapter<String> darkAdapter(List<String> items) {
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this,
+                android.R.layout.simple_spinner_item, items) {
+            @Override
+            public View getView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView tv = (TextView) super.getView(position, convertView, parent);
+                tv.setTextColor(C_TEXT);
+                tv.setBackgroundColor(C_CARD);
+                tv.setPadding(dp(12), dp(10), dp(12), dp(10));
+                return tv;
+            }
+            @Override
+            public View getDropDownView(int position, View convertView, android.view.ViewGroup parent) {
+                TextView tv = (TextView) super.getDropDownView(position, convertView, parent);
+                tv.setTextColor(C_TEXT);
+                tv.setBackgroundColor(C_SURFACE);
+                tv.setPadding(dp(14), dp(12), dp(14), dp(12));
+                if (position == getSpinnerSelectedPosition(this, parent)) {
+                    tv.setBackgroundColor(C_CARD);
+                    tv.setTextColor(C_ACCENT);
+                }
+                return tv;
+            }
+        };
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        return adapter;
+    }
+
+    // Helper to get selected position for dropdown highlight — safe fallback
+    private int getSpinnerSelectedPosition(ArrayAdapter<?> adapter, android.view.ViewGroup parent) {
+        if (parent instanceof android.widget.ListView) {
+            return ((android.widget.ListView) parent).getCheckedItemPosition();
+        }
+        return -1;
+    }
+
+    private Spinner buildStyledSpinner() {
+        Spinner s = new Spinner(this);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(C_CARD);
+        bg.setCornerRadius(dp(8));
+        bg.setStroke(dp(1), C_BORDER2);
+        s.setBackground(bg);
+        s.setPadding(dp(4), 0, dp(4), 0);
+        return s;
+    }
+
     private Spinner buildQuickSetSpinner(List<QuickSetEntry> sets, int selectedSetNumber) {
-        Spinner sp2 = new Spinner(this);
+        Spinner sp2 = buildStyledSpinner();
         List<String> names = new ArrayList<>();
         names.add("None");
         for (QuickSetEntry qs : sets) names.add(qs.name);
-        sp2.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
+        sp2.setAdapter(darkAdapter(names));
         if (selectedSetNumber > 0)
             for (int i = 0; i < sets.size(); i++)
                 if (sets.get(i).setNumber == selectedSetNumber) sp2.setSelection(i + 1);
