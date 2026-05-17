@@ -50,12 +50,40 @@ public class MainActivity extends Activity {
     private final Runnable refreshRunnable = this::doRefreshMain;
     private boolean bgRefresh = false;   // true during a background (broadcast) refresh
 
+    // ── Skill strategy model types ─────────────────────────────────────────────
+    static class SkillEntry {
+        int skillId, mpCost, stamCost; String name;
+        SkillEntry(int id, String n, int mp, int sta) { skillId=id; name=n; mpCost=mp; stamCost=sta; }
+    }
+    static class QuickSetEntry {
+        int setNumber; String name, applyType;
+        QuickSetEntry(int n, String nm, String t) { setNumber=n; name=nm; applyType=t; }
+    }
+    static class StrategyConfig {
+        String bossKey = "";
+        int gearSetNumber=-1, petSetNumber=-1, mainSkillId=0,
+            mainSkillStamCost=1, mainRepeatCount=0,
+            periodicSkillId=-1, periodicEveryN=0;
+        List<Integer> buffSkillIds = new ArrayList<>();
+    }
+    static class BossEntry { String name, key; BossEntry(String n, String k){name=n;key=k;} }
+    interface OnSkillSelected { void onSelected(SkillEntry skill); }
+
     private final BroadcastReceiver receiver = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent i) {
             if ("main".equals(currentScreen)) {
                 // Coalesce rapid-fire broadcasts into one rebuild 300 ms later
                 refreshHandler.removeCallbacks(refreshRunnable);
                 refreshHandler.postDelayed(refreshRunnable, 300);
+            }
+        }
+    };
+
+    private final BroadcastReceiver skillsReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context ctx, Intent i) {
+            if ("ACTION_SKILLS_UPDATED".equals(i.getAction()) && "config".equals(currentScreen)) {
+                // Re-open config to refresh the Boss Strategies tab with new skill data
+                showConfig();
             }
         }
     };
@@ -113,8 +141,8 @@ public class MainActivity extends Activity {
         requestInitialScanOnce();
     }
 
-    @Override protected void onResume()  { super.onResume();  registerReceiver(receiver, new IntentFilter(BotForegroundService.ACTION_STATUS), RECEIVER_NOT_EXPORTED); }
-    @Override protected void onPause()   { try { unregisterReceiver(receiver); } catch (Exception ignored) {} super.onPause(); }
+    @Override protected void onResume()  { super.onResume();  registerReceiver(receiver, new IntentFilter(BotForegroundService.ACTION_STATUS), RECEIVER_NOT_EXPORTED); registerReceiver(skillsReceiver, new IntentFilter("ACTION_SKILLS_UPDATED"), RECEIVER_NOT_EXPORTED); }
+    @Override protected void onPause()   { try { unregisterReceiver(receiver); } catch (Exception ignored) {} try { unregisterReceiver(skillsReceiver); } catch (Exception ignored) {} super.onPause(); }
     @Override public void onBackPressed(){ if (!"main".equals(currentScreen)) showMain(); else super.onBackPressed(); }
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -1055,24 +1083,85 @@ public class MainActivity extends Activity {
         root.removeAllViews();
         root.setBackgroundColor(C_BG);
 
+        LinearLayout outerBox = new LinearLayout(this);
+        outerBox.setOrientation(LinearLayout.VERTICAL);
+        outerBox.setBackgroundColor(C_BG);
+
+        // ── Top bar: title + back + tab buttons ──────────────────────────────
+        LinearLayout topBar = new LinearLayout(this);
+        topBar.setOrientation(LinearLayout.VERTICAL);
+        topBar.setPadding(dp(12), statusBarHeight() + dp(10), dp(12), 0);
+        topBar.setBackgroundColor(C_SURFACE);
+
+        TextView titleTv = txt("Configuration", 18, true, C_TEXT);
+        topBar.addView(titleTv);
+        TextView subTv = txt("All settings saved instantly", 11, false, C_MUTED);
+        subTv.setPadding(0, dp(2), 0, dp(8));
+        topBar.addView(subTv);
+
+        topBar.addView(navBtn("← Back to Main", C_SURFACE, C_MUTED, C_BORDER2, v -> showMain()), lpWH(-1, dp(44)));
+
+        // Tab row
+        LinearLayout tabRow = new LinearLayout(this);
+        tabRow.setOrientation(LinearLayout.HORIZONTAL);
+        tabRow.setPadding(0, dp(8), 0, 0);
+
+        TextView generalTab = buildConfigTabBtn("⚙  General Settings");
+        TextView stratTab   = buildConfigTabBtn("⚔  Boss Strategies");
+        generalTab.setBackgroundColor(Color.argb(40, 0, 229, 200)); // default selected
+        tabRow.addView(generalTab, lp0(1));
+        tabRow.addView(stratTab,   lp0(1));
+        topBar.addView(tabRow, lpW(-1));
+        topBar.addView(divider());
+        outerBox.addView(topBar, lpW(-1));
+
+        // ── Content area with two ScrollViews in a FrameLayout ───────────────
+        FrameLayout contentFrame = new FrameLayout(this);
+
+        ScrollView generalSv = buildGeneralSettingsSv();
+        ScrollView stratSv   = buildBossStrategiesSv();
+        stratSv.setVisibility(View.GONE);
+
+        contentFrame.addView(generalSv, new FrameLayout.LayoutParams(-1, -1));
+        contentFrame.addView(stratSv,   new FrameLayout.LayoutParams(-1, -1));
+
+        outerBox.addView(contentFrame, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+        // Tab click logic
+        generalTab.setOnClickListener(v -> {
+            generalSv.setVisibility(View.VISIBLE);
+            stratSv.setVisibility(View.GONE);
+            generalTab.setBackgroundColor(Color.argb(40, 0, 229, 200));
+            stratTab.setBackgroundColor(Color.TRANSPARENT);
+        });
+        stratTab.setOnClickListener(v -> {
+            generalSv.setVisibility(View.GONE);
+            stratSv.setVisibility(View.VISIBLE);
+            stratTab.setBackgroundColor(Color.argb(40, 0, 229, 200));
+            generalTab.setBackgroundColor(Color.TRANSPARENT);
+        });
+
+        root.addView(outerBox, new FrameLayout.LayoutParams(-1, -1));
+    }
+
+    private TextView buildConfigTabBtn(String label) {
+        TextView t = txt(label, 11, true, C_TEXT2);
+        t.setGravity(Gravity.CENTER);
+        t.setPadding(dp(8), dp(12), dp(8), dp(12));
+        return t;
+    }
+
+    /** Builds the General Settings scroll view — all existing config content unchanged */
+    private ScrollView buildGeneralSettingsSv() {
         ScrollView sv = new ScrollView(this);
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(12), statusBarHeight() + dp(12), dp(12), dp(24));
-
-        TextView title = txt("Configuration", 22, true, C_TEXT);
-        box.addView(title);
-        TextView sub = txt("All settings saved instantly", 12, false, C_MUTED);
-        sub.setPadding(0, 0, 0, dp(14));
-        box.addView(sub);
-
-        box.addView(navBtn("← Back to Main", C_SURFACE, C_MUTED, C_BORDER2, v -> showMain()), lpWH(-1, dp(46)));
+        box.setPadding(dp(12), dp(10), dp(12), dp(24));
 
         addSwitch(box, "Global ON/OFF",          "global_enabled");
         addSwitch(box, "Enable Grakthar",         "enable_grakthar");
         addSwitch(box, "Enable Olympus W9",       "enable_olympus");
-        addSwitch(box, "Enable Hermes",      "enable_hermes");
-        // Custom waves
+        addSwitch(box, "Enable Hermes",           "enable_hermes");
         for (String[] w : loadCustomWaves()) {
             addSwitch(box, "Enable " + w[1], "enable_" + w[0]);
         }
@@ -1083,11 +1172,11 @@ public class MainActivity extends Activity {
         addSwitch(box, "Dark theme",              "dark");
 
         addSkillPicker(box);
-        addEdit(box, "Scan interval (seconds)",                   "scan_interval");
-        addEdit(box, "Asterion stamina threshold",                "asterion_stamina_threshold");
-        addEdit(box, "LSP limit",                                 "lsp_limit");
-        addEdit(box, "FSP limit",                                 "fsp_limit");
-        addEdit(box, "HP potion limit",                           "hp_limit");
+        addEdit(box, "Scan interval (seconds)",     "scan_interval");
+        addEdit(box, "Asterion stamina threshold",  "asterion_stamina_threshold");
+        addEdit(box, "LSP limit",                   "lsp_limit");
+        addEdit(box, "FSP limit",                   "fsp_limit");
+        addEdit(box, "HP potion limit",             "hp_limit");
 
         box.addView(navBtn("Open Battery Settings", C_SURFACE, C_AMBER, C_BORDER2, v -> {
             try { startActivity(new Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)); }
@@ -1095,7 +1184,53 @@ public class MainActivity extends Activity {
         }), lpWH(-1, dp(46)));
 
         sv.addView(box, new ScrollView.LayoutParams(-1, -2));
-        root.addView(sv, new FrameLayout.LayoutParams(-1, -1));
+        return sv;
+    }
+
+    /** Builds the Boss Strategies scroll view — Your Skills chips + per-boss cards */
+    private ScrollView buildBossStrategiesSv() {
+        ScrollView sv = new ScrollView(this);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(12), dp(10), dp(12), dp(24));
+
+        // ── Your Skills header ──────────────────────────────────────────────
+        LinearLayout hdr = row(Gravity.CENTER_VERTICAL);
+        hdr.setPadding(dp(4), dp(4), dp(4), dp(8));
+        hdr.addView(txt("Your Skills", 13, true, C_TEXT), lp0(1));
+
+        TextView rescanBtn = txt("↺ Rescan", 10, true, C_ACCENT);
+        rescanBtn.setPadding(dp(10), dp(5), dp(10), dp(5));
+        rescanBtn.setBackground(roundRect(Color.TRANSPARENT, dp(6), C_ACCENT));
+        rescanBtn.setOnClickListener(v -> {
+            Intent i = new Intent(this, BotForegroundService.class);
+            i.setAction(BotForegroundService.ACTION_RESCAN_SKILLS);
+            if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+            toast("Scanning for skills…");
+        });
+        hdr.addView(rescanBtn, lpWH(-2, -2));
+        box.addView(hdr, lpW(-1));
+
+        // ── Skill chips ─────────────────────────────────────────────────────
+        LinearLayout chipsWrap = configSection(null);
+        buildSkillChips(chipsWrap);
+        box.addView(chipsWrap);
+
+        // ── Per-boss strategy cards ─────────────────────────────────────────
+        List<BossEntry> bosses = loadBossesForStrategies();
+        if (bosses.isEmpty()) {
+            box.addView(emptyCard("No bosses found yet.\nStart the bot to scan, then rescan skills."));
+        } else {
+            TextView bossHdr = txt("Boss Strategies", 13, true, C_TEXT);
+            bossHdr.setPadding(dp(4), dp(12), dp(4), dp(6));
+            box.addView(bossHdr);
+            for (BossEntry b : bosses) {
+                box.addView(buildBossStrategyCard(b));
+            }
+        }
+
+        sv.addView(box, new ScrollView.LayoutParams(-1, -2));
+        return sv;
     }
 
     private void addSkillPicker(LinearLayout box) {
@@ -1161,6 +1296,364 @@ public class MainActivity extends Activity {
         s.setLayoutParams(lp);
         if (title != null) s.addView(txt(title, 14, true, C_TEXT));
         return s;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  BOSS STRATEGY UI
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private void buildSkillChips(LinearLayout container) {
+        container.removeAllViews();
+        List<SkillEntry> skills = loadSkillsFromPrefs();
+        if (skills.isEmpty()) {
+            TextView hint = txt("No skills found — tap ↺ Rescan with an alive boss", 11, false, C_MUTED);
+            hint.setPadding(dp(4), dp(4), dp(4), dp(4));
+            container.addView(hint);
+            return;
+        }
+        // Horizontal scroll for chips
+        HorizontalScrollView hsv = new HorizontalScrollView(this);
+        hsv.setHorizontalScrollBarEnabled(false);
+        LinearLayout row = row(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(2), dp(4), dp(2), dp(4));
+        for (SkillEntry s : skills) {
+            String label = s.name + " · " + (s.mpCost > 0 ? s.mpCost + "MP" : s.stamCost + " STA");
+            TextView chip = chip(label, Color.argb(40, 0, 229, 200), C_ACCENT, Color.argb(80, 0, 229, 200));
+            chip.setTextSize(10);
+            chip.setPadding(dp(8), dp(4), dp(8), dp(4));
+            LinearLayout.LayoutParams clp = lpWH(-2, -2);
+            clp.setMargins(0, 0, dp(6), 0);
+            chip.setLayoutParams(clp);
+            row.addView(chip);
+        }
+        hsv.addView(row, new HorizontalScrollView.LayoutParams(-2, -2));
+        container.addView(hsv, lpW(-1));
+    }
+
+    private View buildBossStrategyCard(BossEntry b) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(roundRect(C_CARD, dp(10), C_BORDER2));
+        LinearLayout.LayoutParams cardLp = lpW(-1);
+        cardLp.setMargins(0, dp(6), 0, 0);
+        card.setLayoutParams(cardLp);
+
+        StrategyConfig existing = loadStrategyFromPrefs(b.key);
+        boolean hasStrat = existing != null;
+
+        // ── Collapsible header ───────────────────────────────────────────────
+        LinearLayout header = row(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(12), dp(12), dp(12), dp(12));
+        TextView nameTv = txt("⚔  " + b.name, 13, true, C_TEXT);
+        header.addView(nameTv, lp0(1));
+        TextView arrow = txt(hasStrat ? "▲" : "▼", 11, false, C_MUTED);
+        header.addView(arrow, lpWH(-2, -2));
+
+        // ── Content (collapsed by default unless strategy saved) ─────────────
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(12), 0, dp(12), dp(12));
+        content.setVisibility(hasStrat ? View.VISIBLE : View.GONE);
+
+        header.setOnClickListener(v -> {
+            boolean open = content.getVisibility() == View.VISIBLE;
+            content.setVisibility(open ? View.GONE : View.VISIBLE);
+            arrow.setText(open ? "▼" : "▲");
+        });
+        card.addView(header);
+        card.addView(content);
+
+        // ── Gear Set spinner ─────────────────────────────────────────────────
+        content.addView(stratLabel("🛡  Gear Set"));
+        List<QuickSetEntry> gearSets = loadQuickSetsFromPrefs("quick_sets_gear");
+        Spinner gearSpinner = buildQuickSetSpinner(gearSets, existing != null ? existing.gearSetNumber : -1);
+        content.addView(gearSpinner, stratSpinnerLp());
+
+        // ── Pet Set spinner ──────────────────────────────────────────────────
+        content.addView(stratLabel("🐾  Pet Set"));
+        List<QuickSetEntry> petSets = loadQuickSetsFromPrefs("quick_sets_pets");
+        Spinner petSpinner = buildQuickSetSpinner(petSets, existing != null ? existing.petSetNumber : -1);
+        content.addView(petSpinner, stratSpinnerLp());
+
+        // ── Buff Skills ──────────────────────────────────────────────────────
+        content.addView(stratLabel("✨  Buffs (fired once before attacking)"));
+        List<Integer> selectedBuffIds = hasStrat ? new ArrayList<>(existing.buffSkillIds) : new ArrayList<>();
+        LinearLayout buffsContainer = new LinearLayout(this);
+        buffsContainer.setOrientation(LinearLayout.VERTICAL);
+        renderBuffRows(buffsContainer, selectedBuffIds);
+        content.addView(buffsContainer, lpW(-1));
+
+        TextView addBuffBtn = txt("+ Add Buff", 11, true, C_ACCENT);
+        addBuffBtn.setPadding(dp(10), dp(6), dp(10), dp(6));
+        addBuffBtn.setBackground(roundRect(Color.TRANSPARENT, dp(6), C_ACCENT));
+        LinearLayout.LayoutParams abbLp = lpWH(-2, -2);
+        abbLp.setMargins(0, dp(6), 0, dp(10));
+        addBuffBtn.setLayoutParams(abbLp);
+        addBuffBtn.setOnClickListener(v -> showSkillPicker(skill -> {
+            if (!selectedBuffIds.contains(skill.skillId)) {
+                selectedBuffIds.add(skill.skillId);
+                renderBuffRows(buffsContainer, selectedBuffIds);
+            }
+        }));
+        content.addView(addBuffBtn);
+
+        // ── Main Attack spinner ──────────────────────────────────────────────
+        content.addView(stratLabel("⚔  Main Attack Skill"));
+        List<SkillEntry> skills = loadSkillsFromPrefs();
+        Spinner mainSpinner = new Spinner(this);
+        List<String> skillNames = new ArrayList<>();
+        for (SkillEntry s : skills) skillNames.add(s.name + "  (" + (s.mpCost > 0 ? s.mpCost + "MP" : s.stamCost + " STA") + ")");
+        if (skillNames.isEmpty()) skillNames.add("No skills — tap Rescan");
+        mainSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, skillNames));
+        if (hasStrat) for (int i = 0; i < skills.size(); i++) if (skills.get(i).skillId == existing.mainSkillId) mainSpinner.setSelection(i);
+        content.addView(mainSpinner, stratSpinnerLp());
+
+        content.addView(stratLabel("Repeat count (hits)"));
+        EditText repeatEdit = stratEdit("e.g. 500");
+        if (hasStrat && existing.mainRepeatCount > 0) repeatEdit.setText(String.valueOf(existing.mainRepeatCount));
+        content.addView(repeatEdit, stratFieldLp());
+
+        // ── Periodic Buff ────────────────────────────────────────────────────
+        content.addView(stratLabel("🔁  Periodic Buff (optional)"));
+        Spinner periodicSpinner = new Spinner(this);
+        List<String> periodicNames = new ArrayList<>();
+        periodicNames.add("None");
+        for (SkillEntry s : skills) periodicNames.add(s.name);
+        periodicSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, periodicNames));
+        if (hasStrat && existing.periodicSkillId > 0)
+            for (int i = 0; i < skills.size(); i++)
+                if (skills.get(i).skillId == existing.periodicSkillId) periodicSpinner.setSelection(i + 1);
+        content.addView(periodicSpinner, stratSpinnerLp());
+
+        content.addView(stratLabel("Every N hits"));
+        EditText periodicEveryEdit = stratEdit("e.g. 10");
+        if (hasStrat && existing.periodicEveryN > 0) periodicEveryEdit.setText(String.valueOf(existing.periodicEveryN));
+        content.addView(periodicEveryEdit, stratFieldLp());
+
+        // ── Save / Clear ─────────────────────────────────────────────────────
+        LinearLayout btnRow = row(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams btnRowLp = lpW(-1);
+        btnRowLp.setMargins(0, dp(10), 0, 0);
+        btnRow.setLayoutParams(btnRowLp);
+
+        TextView saveBtn = txt("💾  Save", 12, true, Color.parseColor("#03090f"));
+        saveBtn.setGravity(Gravity.CENTER);
+        saveBtn.setPadding(dp(12), dp(10), dp(12), dp(10));
+        saveBtn.setBackground(roundRect(C_ACCENT, dp(8), Color.TRANSPARENT));
+
+        TextView clearBtn = txt("🗑  Clear", 12, true, C_DANGER);
+        clearBtn.setGravity(Gravity.CENTER);
+        clearBtn.setPadding(dp(12), dp(10), dp(12), dp(10));
+        clearBtn.setBackground(roundRect(Color.TRANSPARENT, dp(8), C_DANGER));
+
+        LinearLayout.LayoutParams saveBtnLp = new LinearLayout.LayoutParams(0, dp(44), 1.5f);
+        saveBtnLp.setMargins(0, 0, dp(8), 0);
+        LinearLayout.LayoutParams clearBtnLp = new LinearLayout.LayoutParams(0, dp(44), 1f);
+        btnRow.addView(saveBtn, saveBtnLp);
+        btnRow.addView(clearBtn, clearBtnLp);
+        content.addView(btnRow);
+
+        saveBtn.setOnClickListener(v -> {
+            StrategyConfig strat = new StrategyConfig();
+            strat.bossKey = b.key;
+            int gi = gearSpinner.getSelectedItemPosition();
+            strat.gearSetNumber = (gi <= 0 || gi > gearSets.size()) ? -1 : gearSets.get(gi - 1).setNumber;
+            int pi2 = petSpinner.getSelectedItemPosition();
+            strat.petSetNumber = (pi2 <= 0 || pi2 > petSets.size()) ? -1 : petSets.get(pi2 - 1).setNumber;
+            strat.buffSkillIds = new ArrayList<>(selectedBuffIds);
+            int mi = mainSpinner.getSelectedItemPosition();
+            if (mi >= 0 && mi < skills.size()) {
+                strat.mainSkillId       = skills.get(mi).skillId;
+                strat.mainSkillStamCost = skills.get(mi).stamCost;
+            }
+            try { strat.mainRepeatCount = Integer.parseInt(repeatEdit.getText().toString().trim()); }
+            catch (Exception ignored) {}
+            int pri = periodicSpinner.getSelectedItemPosition();
+            strat.periodicSkillId = (pri <= 0 || pri > skills.size()) ? -1 : skills.get(pri - 1).skillId;
+            try { strat.periodicEveryN = Integer.parseInt(periodicEveryEdit.getText().toString().trim()); }
+            catch (Exception ignored) {}
+            saveStrategyToPrefs(strat);
+            toast("Strategy saved for " + b.name);
+            // update arrow to show expanded/saved state
+            arrow.setText("▲");
+            content.setVisibility(View.VISIBLE);
+        });
+
+        clearBtn.setOnClickListener(v -> {
+            sp.edit().remove("strategy_" + b.key).apply();
+            gearSpinner.setSelection(0);
+            petSpinner.setSelection(0);
+            selectedBuffIds.clear();
+            renderBuffRows(buffsContainer, selectedBuffIds);
+            mainSpinner.setSelection(0);
+            repeatEdit.setText("");
+            periodicSpinner.setSelection(0);
+            periodicEveryEdit.setText("");
+            toast("Strategy cleared");
+        });
+
+        return card;
+    }
+
+    private void renderBuffRows(LinearLayout container, List<Integer> buffIds) {
+        container.removeAllViews();
+        List<SkillEntry> skills = loadSkillsFromPrefs();
+        for (int skillId : buffIds) {
+            String name = "Skill#" + skillId;
+            for (SkillEntry s : skills) if (s.skillId == skillId) name = s.name;
+            LinearLayout row = row(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(4), dp(4), dp(4), dp(4));
+            TextView nameTv = txt("● " + name, 11, false, C_TEXT);
+            row.addView(nameTv, lp0(1));
+            final int fId = skillId;
+            TextView rem = txt("✕", 11, true, C_DANGER);
+            rem.setPadding(dp(8), dp(4), dp(4), dp(4));
+            rem.setOnClickListener(v -> { buffIds.remove((Integer) fId); renderBuffRows(container, buffIds); });
+            row.addView(rem, lpWH(-2, -2));
+            container.addView(row, lpW(-1));
+        }
+    }
+
+    private void showSkillPicker(OnSkillSelected callback) {
+        List<SkillEntry> skills = loadSkillsFromPrefs();
+        if (skills.isEmpty()) { toast("No skills found — tap ↺ Rescan first"); return; }
+        String[] names = new String[skills.size()];
+        for (int i = 0; i < skills.size(); i++) {
+            SkillEntry s = skills.get(i);
+            names[i] = s.name + "  (" + (s.mpCost > 0 ? s.mpCost + "MP" : s.stamCost + " STA") + ")";
+        }
+        new AlertDialog.Builder(this)
+            .setTitle("Select Buff Skill")
+            .setItems(names, (d, which) -> callback.onSelected(skills.get(which)))
+            .show();
+    }
+
+    // ── Strategy prefs helpers ─────────────────────────────────────────────────
+    private List<SkillEntry> loadSkillsFromPrefs() {
+        List<SkillEntry> list = new ArrayList<>();
+        String raw = sp.getString("player_skills", "");
+        if (raw == null || raw.isEmpty()) return list;
+        for (String line : raw.split("\n")) {
+            String[] p = line.trim().split("\\|");
+            if (p.length < 4) continue;
+            try { list.add(new SkillEntry(Integer.parseInt(p[0]), p[1], Integer.parseInt(p[2]), Integer.parseInt(p[3]))); }
+            catch (Exception ignored) {}
+        }
+        return list;
+    }
+
+    private List<QuickSetEntry> loadQuickSetsFromPrefs(String key) {
+        List<QuickSetEntry> list = new ArrayList<>();
+        String raw = sp.getString(key, "");
+        if (raw == null || raw.isEmpty()) return list;
+        for (String line : raw.split("\n")) {
+            String[] p = line.trim().split("\\|");
+            if (p.length < 3) continue;
+            try { list.add(new QuickSetEntry(Integer.parseInt(p[0]), p[1], p[2])); }
+            catch (Exception ignored) {}
+        }
+        return list;
+    }
+
+    private StrategyConfig loadStrategyFromPrefs(String bossKey) {
+        String json = sp.getString("strategy_" + bossKey, "");
+        if (json == null || json.isEmpty()) return null;
+        StrategyConfig c = new StrategyConfig();
+        c.bossKey           = extractJsonStr(json, "bossKey");
+        c.gearSetNumber     = extractJsonInt(json, "gearSetNumber", -1);
+        c.petSetNumber      = extractJsonInt(json, "petSetNumber", -1);
+        c.mainSkillId       = extractJsonInt(json, "mainSkillId", 0);
+        c.mainSkillStamCost = extractJsonInt(json, "mainSkillStamCost", 1);
+        c.mainRepeatCount   = extractJsonInt(json, "mainRepeatCount", 0);
+        c.periodicSkillId   = extractJsonInt(json, "periodicSkillId", -1);
+        c.periodicEveryN    = extractJsonInt(json, "periodicEveryN", 0);
+        Matcher ma = Pattern.compile("\"buffSkillIds\":\\[([^\\]]*)\\]").matcher(json);
+        if (ma.find() && !ma.group(1).trim().isEmpty())
+            for (String id : ma.group(1).split(","))
+                try { c.buffSkillIds.add(Integer.parseInt(id.trim())); } catch (Exception ignored) {}
+        return c;
+    }
+
+    private void saveStrategyToPrefs(StrategyConfig c) {
+        StringBuilder sb = new StringBuilder("{");
+        sb.append("\"bossKey\":\"").append(c.bossKey).append("\",");
+        sb.append("\"gearSetNumber\":").append(c.gearSetNumber).append(",");
+        sb.append("\"petSetNumber\":").append(c.petSetNumber).append(",");
+        sb.append("\"mainSkillId\":").append(c.mainSkillId).append(",");
+        sb.append("\"mainSkillStamCost\":").append(c.mainSkillStamCost).append(",");
+        sb.append("\"mainRepeatCount\":").append(c.mainRepeatCount).append(",");
+        sb.append("\"periodicSkillId\":").append(c.periodicSkillId).append(",");
+        sb.append("\"periodicEveryN\":").append(c.periodicEveryN).append(",");
+        sb.append("\"buffSkillIds\":[");
+        for (int i = 0; i < c.buffSkillIds.size(); i++) {
+            sb.append(c.buffSkillIds.get(i));
+            if (i < c.buffSkillIds.size() - 1) sb.append(",");
+        }
+        sb.append("]}");
+        sp.edit().putString("strategy_" + c.bossKey, sb.toString()).apply();
+    }
+
+    private String extractJsonStr(String json, String key) {
+        Matcher m = Pattern.compile("\"" + key + "\":\"([^\"]+)\"").matcher(json);
+        return m.find() ? m.group(1) : "";
+    }
+    private int extractJsonInt(String json, String key, int def) {
+        Matcher m = Pattern.compile("\"" + key + "\":(-?\\d+)").matcher(json);
+        try { return m.find() ? Integer.parseInt(m.group(1)) : def; } catch (Exception e) { return def; }
+    }
+
+    private List<BossEntry> loadBossesForStrategies() {
+        List<BossEntry> result = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (String[] p : parseBossLines(sp.getString("last_bosses", ""))) {
+            if (p.length < 2) continue;
+            String catKey  = (p.length > 7 && p[7] != null && !p[7].isEmpty()) ? p[7] : norm(p[0]);
+            String rootKey = bossRootKey(p[1]);
+            String fullKey = catKey + ":" + rootKey;
+            if (seen.add(fullKey)) result.add(new BossEntry(p[1], fullKey));
+        }
+        return result;
+    }
+
+    // ── Layout helpers for strategy card ──────────────────────────────────────
+    private Spinner buildQuickSetSpinner(List<QuickSetEntry> sets, int selectedSetNumber) {
+        Spinner sp2 = new Spinner(this);
+        List<String> names = new ArrayList<>();
+        names.add("None");
+        for (QuickSetEntry qs : sets) names.add(qs.name);
+        sp2.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names));
+        if (selectedSetNumber > 0)
+            for (int i = 0; i < sets.size(); i++)
+                if (sets.get(i).setNumber == selectedSetNumber) sp2.setSelection(i + 1);
+        return sp2;
+    }
+    private TextView stratLabel(String text) {
+        TextView t = txt(text, 10, true, C_TEXT2);
+        LinearLayout.LayoutParams lp = lpW(-1);
+        lp.setMargins(0, dp(10), 0, dp(2));
+        t.setLayoutParams(lp);
+        return t;
+    }
+    private EditText stratEdit(String hint) {
+        EditText e = new EditText(this);
+        e.setHint(hint);
+        e.setHintTextColor(C_MUTED);
+        e.setTextColor(C_TEXT);
+        e.setSingleLine(true);
+        e.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
+        e.setBackground(roundRect(C_SURFACE, dp(6), C_BORDER2));
+        e.setPadding(dp(10), dp(8), dp(10), dp(8));
+        return e;
+    }
+    private LinearLayout.LayoutParams stratSpinnerLp() {
+        LinearLayout.LayoutParams lp = lpW(-1);
+        lp.setMargins(0, 0, 0, dp(2));
+        return lp;
+    }
+    private LinearLayout.LayoutParams stratFieldLp() {
+        LinearLayout.LayoutParams lp = lpW(-1);
+        lp.setMargins(0, dp(2), 0, dp(2));
+        return lp;
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
