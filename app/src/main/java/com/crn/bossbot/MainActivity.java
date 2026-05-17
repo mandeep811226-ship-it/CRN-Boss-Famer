@@ -90,8 +90,8 @@ public class MainActivity extends Activity {
     private final BroadcastReceiver skillsReceiver = new BroadcastReceiver() {
         @Override public void onReceive(Context ctx, Intent i) {
             if ("ACTION_SKILLS_UPDATED".equals(i.getAction()) && "config".equals(currentScreen)) {
-                // Re-open config to refresh the Boss Strategies tab with new skill data
-                showConfig();
+                // Re-open config and land on Boss Strategies tab so spinners are visible
+                runOnUiThread(() -> showConfig(true));
             }
         }
     };
@@ -1085,7 +1085,9 @@ public class MainActivity extends Activity {
     // ═══════════════════════════════════════════════════════════════════════════
     //  CONFIG SCREEN
     // ═══════════════════════════════════════════════════════════════════════════
-    private void showConfig() {
+    private void showConfig() { showConfig(false); }
+
+    private void showConfig(boolean openStrategiesTab) {
         currentScreen = "config";
         destroyLogin();
         root.removeAllViews();
@@ -1116,7 +1118,7 @@ public class MainActivity extends Activity {
 
         TextView generalTab = buildConfigTabBtn("⚙  General Settings");
         TextView stratTab   = buildConfigTabBtn("⚔  Boss Strategies");
-        generalTab.setBackgroundColor(Color.argb(40, 0, 229, 200)); // default selected
+        generalTab.setBackgroundColor(Color.TRANSPARENT); // set by tab logic below
         tabRow.addView(generalTab, lp0(1));
         tabRow.addView(stratTab,   lp0(1));
         topBar.addView(tabRow, lpW(-1));
@@ -1128,7 +1130,17 @@ public class MainActivity extends Activity {
 
         ScrollView generalSv = buildGeneralSettingsSv();
         ScrollView stratSv   = buildBossStrategiesSv();
-        stratSv.setVisibility(View.GONE);
+
+        // Open on the correct tab — strategies tab when refreshing after a rescan
+        if (openStrategiesTab) {
+            generalSv.setVisibility(View.GONE);
+            stratSv.setVisibility(View.VISIBLE);
+            stratTab.setBackgroundColor(Color.argb(40, 0, 229, 200));
+            generalTab.setBackgroundColor(Color.TRANSPARENT);
+        } else {
+            stratSv.setVisibility(View.GONE);
+            generalTab.setBackgroundColor(Color.argb(40, 0, 229, 200)); // default selected
+        }
 
         contentFrame.addView(generalSv, new FrameLayout.LayoutParams(-1, -1));
         contentFrame.addView(stratSv,   new FrameLayout.LayoutParams(-1, -1));
