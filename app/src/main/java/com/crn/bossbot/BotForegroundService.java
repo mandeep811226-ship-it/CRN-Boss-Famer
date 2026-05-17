@@ -535,9 +535,10 @@ public class BotForegroundService extends Service {
             joinBattle(b.monsterId, userId);
             sleep(700 + new Random().nextInt(600));
 
-            // ── Strategy attack: if a strategy is configured, use it instead of the default loop ──
+            // ── Strategy attack: if a strategy is configured AND enabled, use it ──
             BossStrategy configuredStrat = loadStrategy(b.key);
-            if (configuredStrat != null && configuredStrat.isConfigured()) {
+            if (configuredStrat != null && configuredStrat.isConfigured()
+                    && sp.getBoolean("strategy_enabled_" + b.key, true)) {
                 performStrategyAttack(b, configuredStrat);
                 return;
             }
