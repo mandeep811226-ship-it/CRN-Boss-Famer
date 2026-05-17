@@ -61,9 +61,12 @@ public class MainActivity extends Activity {
     }
     static class StrategyConfig {
         String bossKey = "";
-        int gearSetNumber=-1, petSetNumber=-1, mainSkillId=0,
-            mainSkillStamCost=1, mainRepeatCount=0,
-            periodicSkillId=-1, periodicEveryN=0;
+        int gearSetNumber = -1, petSetNumber = -1;
+        boolean useStaminaSlash = true;
+        int slashSkillId = 0, slashStamCost = 1;   // slash mode
+        int mainClassSkillId = -1;                  // class skill mode
+        int repeatCount = 0;
+        int periodicSkillId = -1, periodicEveryN = 0;
         List<Integer> buffSkillIds = new ArrayList<>();
     }
     static class BossEntry { String name, key; BossEntry(String n, String k){name=n;key=k;} }
@@ -1397,20 +1400,113 @@ public class MainActivity extends Activity {
         }));
         content.addView(addBuffBtn);
 
-        // ── Main Attack spinner ──────────────────────────────────────────────
-        content.addView(stratLabel("⚔  Main Attack Skill"));
+        // ── Main Attack ──────────────────────────────────────────────────────────
+        content.addView(stratLabel("⚔  Main Attack"));
+
+        // Slash skill IDs and costs (matches SKILLS[] in BotForegroundService)
+        final int[]    SLASH_IDS    = {  0,  -1,  -2,   -3,   -4,    -5 };
+        final int[]    SLASH_COSTS  = {  1,  10,  50,  100,  200,  1000 };
+        final String[] SLASH_LABELS = { "×1","×10","×50","×100","×200","×1000" };
+
+        // Track current slash selection index
+        final int[] selectedSlashIdx = { 0 };  // default: Slash ×1
+        if (hasStrat && existing.useStaminaSlash) {
+            for (int i = 0; i < SLASH_IDS.length; i++) {
+                if (SLASH_IDS[i] == existing.slashSkillId) { selectedSlashIdx[0] = i; break; }
+            }
+        }
+
+        // Radio buttons
+        RadioGroup radioGroup = new RadioGroup(this);
+        radioGroup.setOrientation(RadioGroup.HORIZONTAL);
+
+        RadioButton radioSlash = new RadioButton(this);
+        radioSlash.setText("Stamina Slash");
+        radioSlash.setTextColor(C_TEXT);
+        radioSlash.setButtonTintList(android.content.res.ColorStateList.valueOf(C_ACCENT));
+
+        RadioButton radioSkill = new RadioButton(this);
+        radioSkill.setText("Class Skill");
+        radioSkill.setTextColor(C_TEXT);
+        radioSkill.setButtonTintList(android.content.res.ColorStateList.valueOf(C_ACCENT));
+        LinearLayout.LayoutParams radioSkillLp = lpWH(-2, -2);
+        radioSkillLp.setMargins(dp(16), 0, 0, 0);
+        radioSkill.setLayoutParams(radioSkillLp);
+
+        radioGroup.addView(radioSlash);
+        radioGroup.addView(radioSkill);
+        LinearLayout.LayoutParams rgLp = lpW(-1);
+        rgLp.setMargins(0, dp(6), 0, dp(4));
+        radioGroup.setLayoutParams(rgLp);
+        content.addView(radioGroup);
+
+        // ── Slash buttons row ────────────────────────────────────────────────
+        LinearLayout slashRow = row(Gravity.CENTER_VERTICAL);
+        slashRow.setPadding(0, dp(4), 0, dp(4));
+        TextView[] slashBtns = new TextView[SLASH_LABELS.length];
+        for (int i = 0; i < SLASH_LABELS.length; i++) {
+            final int idx = i;
+            TextView btn = txt(SLASH_LABELS[i], 11, true, C_TEXT);
+            btn.setGravity(Gravity.CENTER);
+            btn.setPadding(dp(8), dp(6), dp(8), dp(6));
+            LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(0, dp(34), 1f);
+            blp.setMargins(0, 0, dp(3), 0);
+            btn.setLayoutParams(blp);
+            btn.setBackground(roundRect(
+                idx == selectedSlashIdx[0] ? C_ACCENT : C_SURFACE,
+                dp(6),
+                idx == selectedSlashIdx[0] ? C_ACCENT : C_BORDER2
+            ));
+            btn.setTextColor(idx == selectedSlashIdx[0] ? Color.parseColor("#03090f") : C_TEXT);
+            btn.setOnClickListener(v -> {
+                selectedSlashIdx[0] = idx;
+                for (int j = 0; j < slashBtns.length; j++) {
+                    boolean sel = j == idx;
+                    slashBtns[j].setBackground(roundRect(
+                        sel ? C_ACCENT : C_SURFACE, dp(6),
+                        sel ? C_ACCENT : C_BORDER2
+                    ));
+                    slashBtns[j].setTextColor(sel ? Color.parseColor("#03090f") : C_TEXT);
+                }
+            });
+            slashBtns[i] = btn;
+            slashRow.addView(btn);
+        }
+        content.addView(slashRow, lpW(-1));
+
+        // ── Class skill spinner (active when radioSkill selected) ────────────
+        content.addView(stratLabel("Class Skill"));
         List<SkillEntry> skills = loadSkillsFromPrefs();
-        Spinner mainSpinner = new Spinner(this);
-        List<String> skillNames = new ArrayList<>();
-        for (SkillEntry s : skills) skillNames.add(s.name + "  (" + (s.mpCost > 0 ? s.mpCost + "MP" : s.stamCost + " STA") + ")");
-        if (skillNames.isEmpty()) skillNames.add("No skills — tap Rescan");
-        mainSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, skillNames));
-        if (hasStrat) for (int i = 0; i < skills.size(); i++) if (skills.get(i).skillId == existing.mainSkillId) mainSpinner.setSelection(i);
-        content.addView(mainSpinner, stratSpinnerLp());
+        Spinner classSkillSpinner = new Spinner(this);
+        List<String> classSkillNames = new ArrayList<>();
+        classSkillNames.add("None");
+        for (SkillEntry s : skills)
+            classSkillNames.add(s.name + "  (" + (s.mpCost > 0 ? s.mpCost + "MP" : s.stamCost + " STA") + ")");
+        if (classSkillNames.size() == 1) classSkillNames.add("No skills — tap Rescan");
+        classSkillSpinner.setAdapter(new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, classSkillNames));
+        if (hasStrat && !existing.useStaminaSlash && existing.mainClassSkillId > 0)
+            for (int i = 0; i < skills.size(); i++)
+                if (skills.get(i).skillId == existing.mainClassSkillId) classSkillSpinner.setSelection(i + 1);
+        content.addView(classSkillSpinner, stratSpinnerLp());
+
+        // ── Toggle visibility/alpha based on radio selection ─────────────────
+        Runnable applyToggle = () -> {
+            boolean slashSel = radioSlash.isChecked();
+            slashRow.setAlpha(slashSel ? 1f : 0.35f);
+            for (TextView b2 : slashBtns) b2.setEnabled(slashSel);
+            classSkillSpinner.setAlpha(slashSel ? 0.35f : 1f);
+            classSkillSpinner.setEnabled(!slashSel);
+        };
+        radioSlash.setOnCheckedChangeListener((v, checked) -> { if (checked) applyToggle.run(); });
+        radioSkill.setOnCheckedChangeListener((v, checked) -> { if (checked) applyToggle.run(); });
+        // Set initial radio state
+        if (hasStrat && !existing.useStaminaSlash) radioSkill.setChecked(true);
+        else radioSlash.setChecked(true);
+        applyToggle.run();
 
         content.addView(stratLabel("Repeat count (hits)"));
         EditText repeatEdit = stratEdit("e.g. 500");
-        if (hasStrat && existing.mainRepeatCount > 0) repeatEdit.setText(String.valueOf(existing.mainRepeatCount));
+        if (hasStrat && existing.repeatCount > 0) repeatEdit.setText(String.valueOf(existing.repeatCount));
         content.addView(repeatEdit, stratFieldLp());
 
         // ── Periodic Buff ────────────────────────────────────────────────────
@@ -1461,12 +1557,18 @@ public class MainActivity extends Activity {
             int pi2 = petSpinner.getSelectedItemPosition();
             strat.petSetNumber = (pi2 <= 0 || pi2 > petSets.size()) ? -1 : petSets.get(pi2 - 1).setNumber;
             strat.buffSkillIds = new ArrayList<>(selectedBuffIds);
-            int mi = mainSpinner.getSelectedItemPosition();
-            if (mi >= 0 && mi < skills.size()) {
-                strat.mainSkillId       = skills.get(mi).skillId;
-                strat.mainSkillStamCost = skills.get(mi).stamCost;
+            strat.useStaminaSlash = radioSlash.isChecked();
+            if (strat.useStaminaSlash) {
+                strat.slashSkillId  = SLASH_IDS[selectedSlashIdx[0]];
+                strat.slashStamCost = SLASH_COSTS[selectedSlashIdx[0]];
+                strat.mainClassSkillId = -1;
+            } else {
+                strat.slashSkillId  = 0;
+                strat.slashStamCost = 1;
+                int ci = classSkillSpinner.getSelectedItemPosition();
+                strat.mainClassSkillId = (ci <= 0 || ci > skills.size()) ? -1 : skills.get(ci - 1).skillId;
             }
-            try { strat.mainRepeatCount = Integer.parseInt(repeatEdit.getText().toString().trim()); }
+            try { strat.repeatCount = Integer.parseInt(repeatEdit.getText().toString().trim()); }
             catch (Exception ignored) {}
             int pri = periodicSpinner.getSelectedItemPosition();
             strat.periodicSkillId = (pri <= 0 || pri > skills.size()) ? -1 : skills.get(pri - 1).skillId;
@@ -1485,10 +1587,18 @@ public class MainActivity extends Activity {
             petSpinner.setSelection(0);
             selectedBuffIds.clear();
             renderBuffRows(buffsContainer, selectedBuffIds);
-            mainSpinner.setSelection(0);
+            radioSlash.setChecked(true);
+            selectedSlashIdx[0] = 0;
+            for (int j = 0; j < slashBtns.length; j++) {
+                boolean sel = j == 0;
+                slashBtns[j].setBackground(roundRect(sel ? C_ACCENT : C_SURFACE, dp(6), sel ? C_ACCENT : C_BORDER2));
+                slashBtns[j].setTextColor(sel ? Color.parseColor("#03090f") : C_TEXT);
+            }
+            classSkillSpinner.setSelection(0);
             repeatEdit.setText("");
             periodicSpinner.setSelection(0);
             periodicEveryEdit.setText("");
+            applyToggle.run();
             toast("Strategy cleared");
         });
 
@@ -1559,14 +1669,28 @@ public class MainActivity extends Activity {
         String json = sp.getString("strategy_" + bossKey, "");
         if (json == null || json.isEmpty()) return null;
         StrategyConfig c = new StrategyConfig();
-        c.bossKey           = extractJsonStr(json, "bossKey");
-        c.gearSetNumber     = extractJsonInt(json, "gearSetNumber", -1);
-        c.petSetNumber      = extractJsonInt(json, "petSetNumber", -1);
-        c.mainSkillId       = extractJsonInt(json, "mainSkillId", 0);
-        c.mainSkillStamCost = extractJsonInt(json, "mainSkillStamCost", 1);
-        c.mainRepeatCount   = extractJsonInt(json, "mainRepeatCount", 0);
-        c.periodicSkillId   = extractJsonInt(json, "periodicSkillId", -1);
-        c.periodicEveryN    = extractJsonInt(json, "periodicEveryN", 0);
+        c.bossKey          = extractJsonStr(json, "bossKey");
+        c.gearSetNumber    = extractJsonInt(json, "gearSetNumber", -1);
+        c.petSetNumber     = extractJsonInt(json, "petSetNumber", -1);
+        c.useStaminaSlash  = !json.contains("\"useStaminaSlash\":false");
+        c.slashSkillId     = extractJsonInt(json, "slashSkillId", 0);
+        c.slashStamCost    = extractJsonInt(json, "slashStamCost", 1);
+        c.mainClassSkillId = extractJsonInt(json, "mainClassSkillId", -1);
+        c.repeatCount      = extractJsonInt(json, "repeatCount", 0);
+        // Legacy migration from old mainRepeatCount/mainSkillId fields
+        if (c.repeatCount == 0) {
+            int legacyRepeat = extractJsonInt(json, "mainRepeatCount", 0);
+            if (legacyRepeat > 0) {
+                c.repeatCount = legacyRepeat;
+                int legacySkillId = extractJsonInt(json, "mainSkillId", 0);
+                if (legacySkillId > 0) {
+                    c.useStaminaSlash  = false;
+                    c.mainClassSkillId = legacySkillId;
+                }
+            }
+        }
+        c.periodicSkillId  = extractJsonInt(json, "periodicSkillId", -1);
+        c.periodicEveryN   = extractJsonInt(json, "periodicEveryN", 0);
         Matcher ma = Pattern.compile("\"buffSkillIds\":\\[([^\\]]*)\\]").matcher(json);
         if (ma.find() && !ma.group(1).trim().isEmpty())
             for (String id : ma.group(1).split(","))
@@ -1579,9 +1703,11 @@ public class MainActivity extends Activity {
         sb.append("\"bossKey\":\"").append(c.bossKey).append("\",");
         sb.append("\"gearSetNumber\":").append(c.gearSetNumber).append(",");
         sb.append("\"petSetNumber\":").append(c.petSetNumber).append(",");
-        sb.append("\"mainSkillId\":").append(c.mainSkillId).append(",");
-        sb.append("\"mainSkillStamCost\":").append(c.mainSkillStamCost).append(",");
-        sb.append("\"mainRepeatCount\":").append(c.mainRepeatCount).append(",");
+        sb.append("\"useStaminaSlash\":").append(c.useStaminaSlash).append(",");
+        sb.append("\"slashSkillId\":").append(c.slashSkillId).append(",");
+        sb.append("\"slashStamCost\":").append(c.slashStamCost).append(",");
+        sb.append("\"mainClassSkillId\":").append(c.mainClassSkillId).append(",");
+        sb.append("\"repeatCount\":").append(c.repeatCount).append(",");
         sb.append("\"periodicSkillId\":").append(c.periodicSkillId).append(",");
         sb.append("\"periodicEveryN\":").append(c.periodicEveryN).append(",");
         sb.append("\"buffSkillIds\":[");
@@ -2127,155 +2253,4 @@ public class MainActivity extends Activity {
 
     private TextView smallBtn(String label, int color, View.OnClickListener l) {
         TextView b = txt(label, 10, true, color);
-        b.setPadding(dp(10), dp(4), dp(10), dp(4));
-        b.setBackground(roundRect(Color.TRANSPARENT, dp(6), color));
-        b.setOnClickListener(l);
-        LinearLayout.LayoutParams lp = lpWH(-2, -2);
-        lp.setMargins(dp(6), 0, 0, 0);
-        b.setLayoutParams(lp);
-        return b;
-    }
-
-    private TextView chip(String text, int bg, int textColor, int stroke) {
-        TextView t = txt(text, 9, true, textColor);
-        t.setGravity(Gravity.CENTER);
-        t.setSingleLine(true);
-        t.setPadding(dp(7), dp(2), dp(7), dp(2));
-        t.setBackground(roundRect(bg, dp(5), stroke));
-        return t;
-    }
-
-    private View divider() {
-        View d = new View(this);
-        d.setBackgroundColor(C_BORDER);
-        d.setLayoutParams(new LinearLayout.LayoutParams(-1, dp(1)));
-        return d;
-    }
-
-    private GradientDrawable rightBorder(int color) {
-        // Simulate right border via a layer — simplest approach is just card bg
-        return roundRect(C_SURFACE, 0, color);
-    }
-
-    private LinearLayout row(int gravity) {
-        LinearLayout r = new LinearLayout(this);
-        r.setOrientation(LinearLayout.HORIZONTAL);
-        r.setGravity(gravity);
-        return r;
-    }
-
-    private TextView txt(String v, int spSize, boolean bold, int color) {
-        TextView t = new TextView(this);
-        t.setText(v);
-        t.setTextSize(spSize);
-        t.setTextColor(color);
-        if (bold) t.setTypeface(Typeface.DEFAULT_BOLD);
-        return t;
-    }
-
-    private GradientDrawable roundRect(int color, int radius, int strokeColor) {
-        GradientDrawable g = new GradientDrawable();
-        g.setColor(color);
-        g.setCornerRadius(radius);
-        if (strokeColor != Color.TRANSPARENT) g.setStroke(dp(1), strokeColor);
-        return g;
-    }
-
-    // layout param helpers
-    private LinearLayout.LayoutParams lp0(float weight) {
-        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2);
-        lp.weight = weight;
-        return lp;
-    }
-    private LinearLayout.LayoutParams lpW(int width) {
-        return new LinearLayout.LayoutParams(width, -2);
-    }
-    private LinearLayout.LayoutParams lpWH(int w, int h) {
-        return new LinearLayout.LayoutParams(w, h);
-    }
-
-    private GridLayout.LayoutParams bossCardLp() {
-        GridLayout.LayoutParams lp = new GridLayout.LayoutParams();
-        lp.width = (getResources().getDisplayMetrics().widthPixels - dp(36)) / 2;
-        lp.height = GridLayout.LayoutParams.WRAP_CONTENT;
-        lp.setMargins(dp(4), dp(4), dp(4), dp(4));
-        return lp;
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  HELPERS — misc
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    private String waveIcon(String key) {
-        if (key.contains("grakthar")) return "⚔️";
-        if (key.contains("olympus"))  return "🌊";
-        return "⚡";
-    }
-    private String waveIconForLabel(String label) {
-        String l = label.toLowerCase(Locale.US);
-        if (l.contains("grakthar")) return "⚔️";
-        if (l.contains("olympus"))  return "🌊";
-        return "⚡";
-    }
-
-    private static String norm(String s) {
-        return (s == null ? "" : s).toLowerCase(Locale.US)
-            .replaceAll("[^a-z0-9]+", "_")
-            .replaceAll("^_+|_+$", "");
-    }
-
-    private static long parseLong(String s) {
-        try { return Long.parseLong((s == null ? "0" : s).replaceAll("[^0-9]", "")); }
-        catch (Exception e) { return 0; }
-    }
-
-    private String fmt(String s) {
-        try {
-            long n = Long.parseLong(s);
-            if (n >= 1_000_000_000) return String.format(Locale.US, "%.1fb", n / 1_000_000_000d).replace(".0", "");
-            if (n >= 1_000_000)     return String.format(Locale.US, "%.1fm", n / 1_000_000d).replace(".0", "");
-            if (n >= 1_000)         return (n / 1_000) + "k";
-            return String.valueOf(n);
-        } catch (Exception e) {
-            return (s == null || s.isEmpty()) ? "—" : s;
-        }
-    }
-
-    private int statusBarHeight() {
-        int id = getResources().getIdentifier("status_bar_height", "dimen", "android");
-        return id > 0 ? getResources().getDimensionPixelSize(id) : dp(24);
-    }
-    private int dp(int v) { return (int)(v * getResources().getDisplayMetrics().density + .5f); }
-    private void toast(String s) { Toast.makeText(this, s, Toast.LENGTH_SHORT).show(); }
-    private void destroyLogin() {
-        if (loginWeb != null) {
-            try { loginWeb.stopLoading(); loginWeb.destroy(); } catch (Exception ignored) {}
-            loginWeb = null;
-        }
-    }
-
-    private void requestIgnoreBatteryOptimizationsOnce() {
-        if (Build.VERSION.SDK_INT < 23) return;
-        if (sp.getBoolean("asked_battery_optimization", false)) return;
-        try {
-            PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
-            if (pm != null && !pm.isIgnoringBatteryOptimizations(getPackageName())) {
-                sp.edit().putBoolean("asked_battery_optimization", true).apply();
-                Intent i = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
-                i.setData(Uri.parse("package:" + getPackageName()));
-                startActivity(i);
-            }
-        } catch (Exception ignored) {}
-    }
-
-    private void requestInitialScanOnce() {
-        if (!isConnected()) return;
-        if (sp.getBoolean("global_enabled", false)) return;
-        long last = sp.getLong("initial_scan_request_ms", 0);
-        if (System.currentTimeMillis() - last < 30000) return;
-        sp.edit().putLong("initial_scan_request_ms", System.currentTimeMillis())
-          .putString("ui_state", "SCAN").apply();
-        Intent in = new Intent(this, BotForegroundService.class).setAction(BotForegroundService.ACTION_SCAN_ONCE);
-        if (Build.VERSION.SDK_INT >= 26) startForegroundService(in); else startService(in);
-    }
-}
+   
