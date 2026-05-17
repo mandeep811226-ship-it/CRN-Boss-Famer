@@ -537,10 +537,29 @@ public class BotForegroundService extends Service {
 
             // ── Strategy attack: if a strategy is configured AND enabled, use it ──
             BossStrategy configuredStrat = loadStrategy(b.key);
-            if (configuredStrat != null && configuredStrat.isConfigured()
-                    && sp.getBoolean("strategy_enabled_" + b.key, true)) {
-                performStrategyAttack(b, configuredStrat);
-                return;
+            if (configuredStrat != null && configuredStrat.isConfigured()) {
+                boolean stratOn = sp.getBoolean("strategy_enabled_" + b.key, true);
+                append("INFO", b.name + " strategy found — enabled=" + stratOn
+                    + " slash=" + configuredStrat.useStaminaSlash
+                    + " repeat=" + configuredStrat.repeatCount
+                    + " gear=" + configuredStrat.gearSetNumber
+                    + " pet=" + configuredStrat.petSetNumber
+                    + " buffs=" + configuredStrat.buffSkillIds.size());
+                if (stratOn) {
+                    performStrategyAttack(b, configuredStrat);
+                    return;
+                } else {
+                    append("INFO", b.name + " strategy disabled — using default attack");
+                }
+            } else {
+                if (configuredStrat == null)
+                    append("INFO", b.name + " no strategy saved — using default attack");
+                else
+                    append("WARN", b.name + " strategy incomplete (repeatCount="
+                        + configuredStrat.repeatCount + " mainSkill="
+                        + (configuredStrat.useStaminaSlash ? configuredStrat.slashSkillId
+                                                           : configuredStrat.mainClassSkillId)
+                        + ") — using default attack");
             }
 
             int hitCount = 0;
@@ -1305,25 +1324,39 @@ public class BotForegroundService extends Service {
 
     void performStrategyAttack(Boss b, BossStrategy strat) throws Exception {
         String mid = b.monsterId;
+        append("INFO", b.name + " strategy START — monsterId=" + mid);
 
         // 1. Apply quick sets
-        if (strat.gearSetNumber > 0) applyQuickSet(strat.gearSetNumber, "equipments");
-        if (strat.petSetNumber  > 0) applyQuickSet(strat.petSetNumber,  "pets");
+        if (strat.gearSetNumber > 0) {
+            append("INFO", b.name + " applying gear set #" + strat.gearSetNumber);
+            applyQuickSet(strat.gearSetNumber, "equipments");
+        }
+        if (strat.petSetNumber > 0) {
+            append("INFO", b.name + " applying pet set #" + strat.petSetNumber);
+            applyQuickSet(strat.petSetNumber, "pets");
+        }
 
         // 2. One-time buff skills
         for (int skillId : strat.buffSkillIds) {
+            append("INFO", b.name + " firing buff: " + skillNameFor(skillId) + " (id=" + skillId + ")");
             String res = postDamage(mid, skillId, 1);
-            append("INFO", b.name + " buff: " + skillNameFor(skillId));
             if (!empty(res) && res.contains("not enough mana"))
                 append("WARN", b.name + " buff skipped: not enough mana");
+            else if (empty(res))
+                append("WARN", b.name + " buff got null/empty response");
             sleep(3000 + new Random().nextInt(1000));
         }
 
         // 3. Main attack loop — minimum 3s between hits to avoid 429
         int hits = 0;
+        append("INFO", b.name + " main loop START — mode="
+            + (strat.useStaminaSlash ? "slash id=" + strat.slashSkillId + " sta=" + strat.slashStamCost
+                                     : "classSkill id=" + strat.mainClassSkillId)
+            + " repeat=" + strat.repeatCount);
         for (int i = 0; i < strat.repeatCount && running; i++) {
             if (strat.periodicSkillId > 0 && hits > 0
                     && strat.periodicEveryN > 0 && hits % strat.periodicEveryN == 0) {
+                append("INFO", b.name + " periodic buff at hit " + hits + ": " + skillNameFor(strat.periodicSkillId));
                 postDamage(mid, strat.periodicSkillId, 1);
                 sleep(3000 + new Random().nextInt(1000));
             }
@@ -1335,9 +1368,11 @@ public class BotForegroundService extends Service {
             }
             if (res == null || res.contains("dead")
                     || res.contains("not enough stamina")
-                    || res.contains("not enough mana")) break;
+                    || res.contains("not enough mana")) {
+                append("INFO", b.name + " loop stopped at hit " + hits + ": " + res);
+                break;
+            }
             hits++;
-            // Minimum 3s delay between hits — randomised to avoid detection
             if (i < strat.repeatCount - 1) sleep(3000 + new Random().nextInt(1500));
         }
         append("INFO", b.name + " strategy done: " + hits + " hits");
