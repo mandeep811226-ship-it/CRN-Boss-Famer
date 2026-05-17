@@ -1367,7 +1367,7 @@ public class MainActivity extends Activity {
         LinearLayout header = row(Gravity.CENTER_VERTICAL);
         header.setPadding(dp(12), dp(10), dp(12), dp(10));
 
-        // Toggle — enables/disables this strategy without deleting it
+        // Enable/disable toggle
         Switch stratSwitch = new Switch(this);
         stratSwitch.setChecked(stratEnabled);
         stratSwitch.setThumbTintList(android.content.res.ColorStateList.valueOf(C_ACCENT));
@@ -1375,12 +1375,8 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams swLp = lpWH(-2, -2);
         swLp.setMargins(0, 0, dp(8), 0);
         stratSwitch.setLayoutParams(swLp);
-        stratSwitch.setOnCheckedChangeListener((v, checked) -> {
-            sp.edit().putBoolean(enabledPrefKey, checked).apply();
-            // Dim card content when disabled so user knows it's off
-            card.setAlpha(checked ? 1f : 0.5f);
-        });
-        // Stop toggle tap from also collapsing/expanding the card
+        stratSwitch.setOnCheckedChangeListener((v, checked) ->
+            sp.edit().putBoolean(enabledPrefKey, checked).apply());
         stratSwitch.setOnTouchListener((v, ev) -> {
             v.getParent().requestDisallowInterceptTouchEvent(true);
             return false;
@@ -1391,9 +1387,6 @@ public class MainActivity extends Activity {
         header.addView(nameTv, lp0(1));
         TextView arrow = txt(hasStrat ? "▲" : "▼", 11, false, C_MUTED);
         header.addView(arrow, lpWH(-2, -2));
-
-        // Apply initial dim state
-        card.setAlpha(stratEnabled ? 1f : 0.5f);
 
         // ── Content (collapsed by default unless strategy saved) ─────────────
         LinearLayout content = new LinearLayout(this);
@@ -1412,12 +1405,18 @@ public class MainActivity extends Activity {
         // ── Gear Set spinner ─────────────────────────────────────────────────
         content.addView(stratLabel("🛡  Gear Set"));
         List<QuickSetEntry> gearSets = loadQuickSetsFromPrefs("quick_sets_gear");
+        if (gearSets.isEmpty())
+            for (int i = 1; i <= 6; i++)
+                gearSets.add(new QuickSetEntry(i, "Gear Set " + i, "equipments"));
         Spinner gearSpinner = buildQuickSetSpinner(gearSets, existing != null ? existing.gearSetNumber : -1);
         content.addView(gearSpinner, stratSpinnerLp());
 
         // ── Pet Set spinner ──────────────────────────────────────────────────
         content.addView(stratLabel("🐾  Pet Set"));
         List<QuickSetEntry> petSets = loadQuickSetsFromPrefs("quick_sets_pets");
+        if (petSets.isEmpty())
+            for (int i = 1; i <= 6; i++)
+                petSets.add(new QuickSetEntry(i, "Pet Set " + i, "pets"));
         Spinner petSpinner = buildQuickSetSpinner(petSets, existing != null ? existing.petSetNumber : -1);
         content.addView(petSpinner, stratSpinnerLp());
 
@@ -1563,10 +1562,15 @@ public class MainActivity extends Activity {
         };
         radioSlash.setOnCheckedChangeListener((v, checked) -> { if (checked) applyToggle.run(); });
         radioSkill.setOnCheckedChangeListener((v, checked) -> { if (checked) applyToggle.run(); });
-        // Set initial radio state
+        // Set initial radio state — both sections fully visible on first load
+        // greying only happens after user taps a radio button
         if (hasStrat && !existing.useStaminaSlash) radioSkill.setChecked(true);
         else radioSlash.setChecked(true);
-        applyToggle.run();
+        fSlashRow.setAlpha(1f);
+        for (TextView btn : fSlashBtns) btn.setEnabled(true);
+        fClassSkillLabel.setAlpha(1f);
+        fClassSkillSpinner.setAlpha(1f);
+        fClassSkillSpinner.setEnabled(true);
 
         content.addView(stratLabel("Repeat count (hits)"));
         EditText repeatEdit = stratEdit("e.g. 500");
@@ -1844,7 +1848,8 @@ public class MainActivity extends Activity {
         bg.setCornerRadius(dp(8));
         bg.setStroke(dp(1), C_BORDER2);
         s.setBackground(bg);
-        s.setPadding(dp(4), 0, dp(4), 0);
+        s.setPadding(dp(12), dp(2), dp(12), dp(2));
+        s.setMinimumHeight(dp(46));
         return s;
     }
 
