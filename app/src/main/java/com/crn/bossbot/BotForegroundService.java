@@ -16,12 +16,13 @@ import java.util.*;
 import java.util.regex.*;
 
 public class BotForegroundService extends Service {
-    public static final String ACTION_START      = "START";
-    public static final String ACTION_STOP       = "STOP";
-    public static final String ACTION_STATUS     = "com.crn.bossbot.STATUS";
-    public static final String ACTION_CLEAR_LOGS = "CLEAR_LOGS";
-    public static final String ACTION_SCAN_ONCE  = "SCAN_ONCE";
-    public static final String ACTION_RELOAD_WAVES = "RELOAD_WAVES";
+    public static final String ACTION_START         = "START";
+    public static final String ACTION_STOP          = "STOP";
+    public static final String ACTION_STATUS        = "com.crn.bossbot.STATUS";
+    public static final String ACTION_CLEAR_LOGS    = "CLEAR_LOGS";
+    public static final String ACTION_SCAN_ONCE     = "SCAN_ONCE";
+    public static final String ACTION_RELOAD_WAVES  = "RELOAD_WAVES";
+    public static final String ACTION_RESCAN_SKILLS = "RESCAN_SKILLS";
 
     private static final String PREF_CUSTOM_WAVES = "custom_waves_json";
 
@@ -36,9 +37,16 @@ public class BotForegroundService extends Service {
     private static final String HP_POTION_URL = BASE + "/user_heal_potion.php";
     private static final String AUTO_STATUS_URL  = BASE + "/auto_farm_status.php";
     private static final String AUTO_ACTIONS_URL = BASE + "/auto_farm_actions.php";
+    // ── Skill Strategy constants ───────────────────────────────────────────────
+    private static final String QUICK_SET_URL = BASE + "/quick_sets_apply.php";
+    private static final String SKILLS_KEY    = "player_skills";
+    private static final String GEAR_SETS_KEY = "quick_sets_gear";
+    private static final String PET_SETS_KEY  = "quick_sets_pets";
+    private static final String STRAT_PREFIX  = "strategy_";
 
     // ── Runtime state ──────────────────────────────────────────────────────────
     private volatile boolean running = false;
+    private volatile boolean rescanRequested = false;
     private Thread worker;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock  wifiLock;
@@ -129,6 +137,7 @@ public class BotForegroundService extends Service {
         if (ACTION_STOP.equals(action))         { stopBot(); return START_NOT_STICKY; }
         if (ACTION_CLEAR_LOGS.equals(action))   { clearLogs(); return running ? START_STICKY : START_NOT_STICKY; }
         if (ACTION_SCAN_ONCE.equals(action))    { scanOnceAsync(); return running ? START_STICKY : START_NOT_STICKY; }
+        if (ACTION_RESCAN_SKILLS.equals(action)) { new Thread(this::rescanSkills).start(); return running ? START_STICKY : START_NOT_STICKY; }
         if (ACTION_RELOAD_WAVES.equals(action)) {
             // Custom waves are read fresh on every scan via buildCategories() — nothing extra needed
             append("INFO", "Wave list reloaded — will take effect on next scan.");
@@ -252,6 +261,7 @@ public class BotForegroundService extends Service {
         // ── Fetch battle page for each alive boss to get accurate auto-die timer ──
         // The wave page's data-next-ts for alive bosses = next spawn time (after cycle),
         // NOT the auto-die countdown. The real value is in the battle.php autoDieTimer div.
+        boolean parsedSkillsThisScan = false;
         for (Boss b : all) {
             if (!b.alive) continue;
 
@@ -263,6 +273,13 @@ public class BotForegroundService extends Service {
 
             try {
                 String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
+
+                // Parse skills and quick sets once per scan cycle
+                if (!parsedSkillsThisScan) {
+                    parsePlayerSkills(battleHtml);
+                    parseQuickSets(battleHtml);
+                    parsedSkillsThisScan = true;
+                }
 
                 // Strategy 1 (BEST): window.AUTO_DIE_CFG = { nextDieMs: 1234567 }
                 // This is the authoritative server-set value in a <script> tag
@@ -513,6 +530,13 @@ public class BotForegroundService extends Service {
             append("INFO", "Joining battle: [" + b.categoryLabel + "] " + b.name);
             joinBattle(b.monsterId, userId);
             sleep(700 + new Random().nextInt(600));
+
+            // ── Strategy attack: if a strategy is configured, use it instead of the default loop ──
+            BossStrategy configuredStrat = loadStrategy(b.key);
+            if (configuredStrat != null && configuredStrat.isConfigured()) {
+                performStrategyAttack(b, configuredStrat);
+                return;
+            }
 
             int hitCount = 0;
             while (running && sp.getBoolean("global_enabled",false) && totalDamage < damageCap
@@ -1038,6 +1062,227 @@ public class BotForegroundService extends Service {
         return baseMs+1500+new Random().nextInt(2500);
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  SKILL STRATEGY SYSTEM
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // ── Prefs I/O ──────────────────────────────────────────────────────────────
+    List<PlayerSkill> loadSkills() {
+        List<PlayerSkill> list = new ArrayList<>();
+        String raw = sp.getString(SKILLS_KEY, "");
+        if (empty(raw)) return list;
+        for (String line : raw.split("\n"))
+            if (!line.trim().isEmpty())
+                try { list.add(PlayerSkill.fromPipe(line.trim())); } catch (Exception ignored) {}
+        return list;
+    }
+
+    List<QuickSet> loadQuickSets(String key) {
+        List<QuickSet> list = new ArrayList<>();
+        String raw = sp.getString(key, "");
+        if (empty(raw)) return list;
+        for (String line : raw.split("\n"))
+            if (!line.trim().isEmpty())
+                try { list.add(QuickSet.fromPipe(line.trim())); } catch (Exception ignored) {}
+        return list;
+    }
+
+    void saveQuickSets(List<QuickSet> sets, String key) {
+        StringBuilder sb = new StringBuilder();
+        for (QuickSet qs : sets) sb.append(qs.toPipe()).append("\n");
+        sp.edit().putString(key, sb.toString().trim()).apply();
+    }
+
+    BossStrategy loadStrategy(String bossKey) {
+        String json = sp.getString(STRAT_PREFIX + bossKey, "");
+        if (empty(json)) return null;
+        return BossStrategy.fromJson(json);
+    }
+
+    void saveStrategy(BossStrategy s) {
+        sp.edit().putString(STRAT_PREFIX + s.bossKey, s.toJson()).apply();
+    }
+
+    void clearStrategy(String bossKey) {
+        sp.edit().remove(STRAT_PREFIX + bossKey).apply();
+    }
+
+    String skillNameFor(int skillId) {
+        for (PlayerSkill s : loadSkills()) if (s.skillId == skillId) return s.name;
+        return "Skill#" + skillId;
+    }
+
+    List<String> getAllStrategyKeys() {
+        List<String> keys = new ArrayList<>();
+        Map<String, ?> all = sp.getAll();
+        for (String k : all.keySet()) if (k.startsWith(STRAT_PREFIX)) keys.add(k);
+        return keys;
+    }
+
+    // ── HTML scraping ──────────────────────────────────────────────────────────
+    void parsePlayerSkills(String battleHtml) {
+        if (!empty(sp.getString(SKILLS_KEY, "")) && !rescanRequested) return;
+        List<PlayerSkill> found = new ArrayList<>();
+        Pattern p = Pattern.compile(
+            "data-skill-id=\"(\\d+)\"[^>]*" +
+            "data-skill-name=\"([^\"]+)\"[^>]*" +
+            "data-stam-cost=\"(\\d+)\"" +
+            "[\\s\\S]{0,400}?" +
+            "skill-cost[^>]*>([^<]+)<",
+            Pattern.CASE_INSENSITIVE);
+        Matcher m = p.matcher(battleHtml);
+        while (m.find()) {
+            PlayerSkill s = new PlayerSkill();
+            s.skillId = Integer.parseInt(m.group(1));
+            s.name    = m.group(2).trim();
+            String costRaw = m.group(4).trim().toUpperCase(Locale.US);
+            int costVal = Integer.parseInt(costRaw.replaceAll("[^0-9]", ""));
+            if (costRaw.contains("MP")) { s.mpCost = costVal; s.stamCost = 0; }
+            else                        { s.stamCost = costVal; s.mpCost = 0; }
+            found.add(s);
+        }
+        if (!found.isEmpty()) {
+            StringBuilder sb = new StringBuilder();
+            for (PlayerSkill s : found) sb.append(s.toPipe()).append("\n");
+            sp.edit().putString(SKILLS_KEY, sb.toString().trim()).apply();
+            append("INFO", "Skills saved: " + found.size() + " found");
+        }
+    }
+
+    void parseQuickSets(String battleHtml) {
+        if (!empty(sp.getString(GEAR_SETS_KEY, "")) && !rescanRequested) return;
+        List<QuickSet> gear = new ArrayList<>();
+        List<QuickSet> pets = new ArrayList<>();
+        Pattern p = Pattern.compile(
+            "data-set-number=\"(\\d+)\"[^>]*" +
+            "data-apply-type=\"(equipments|pets)\"[^>]*>" +
+            "([^<]+)<",
+            Pattern.CASE_INSENSITIVE);
+        Matcher m = p.matcher(battleHtml);
+        while (m.find()) {
+            QuickSet qs = new QuickSet();
+            qs.setNumber = Integer.parseInt(m.group(1));
+            qs.applyType = m.group(2);
+            qs.name      = m.group(3).trim();
+            if (qs.applyType.equals("equipments")) gear.add(qs); else pets.add(qs);
+        }
+        if (gear.isEmpty())
+            for (int i = 1; i <= 6; i++) gear.add(new QuickSet(i, "Gear Set " + i, "equipments"));
+        if (pets.isEmpty())
+            for (int i = 1; i <= 6; i++) pets.add(new QuickSet(i, "Pet Set " + i, "pets"));
+        saveQuickSets(gear, GEAR_SETS_KEY);
+        saveQuickSets(pets, PET_SETS_KEY);
+        append("INFO", "Quick sets: " + gear.size() + " gear, " + pets.size() + " pets");
+    }
+
+    // ── Strategy execution ─────────────────────────────────────────────────────
+    void applyQuickSet(int setNumber, String applyType) {
+        String body = "set_number=" + setNumber + "&target_set=attack&apply_type=" + applyType;
+        try {
+            postRaw(QUICK_SET_URL, body, BATTLE_URL);
+            append("INFO", "Quick set applied: " + applyType + " #" + setNumber);
+            sleep(800);
+        } catch (Exception e) {
+            append("ERROR", "Quick set failed: " + e.getMessage());
+        }
+    }
+
+    String postDamage(String monsterId, int skillId, int stamCost) {
+        try {
+            String body = "monster_id=" + enc(monsterId)
+                        + "&skill_id=" + enc(String.valueOf(skillId))
+                        + "&stamina_cost=" + enc(String.valueOf(stamCost));
+            HttpResult hr = postRaw(DMG_URL, body, BATTLE_URL + "?id=" + enc(monsterId));
+            return hr.text;
+        } catch (Exception e) {
+            append("ERROR", "postDamage failed: " + e.getMessage());
+            return null;
+        }
+    }
+
+    void performStrategyAttack(Boss b, BossStrategy strat) throws Exception {
+        String mid = b.monsterId;
+
+        // 1. Apply quick sets
+        if (strat.gearSetNumber > 0) applyQuickSet(strat.gearSetNumber, "equipments");
+        if (strat.petSetNumber  > 0) applyQuickSet(strat.petSetNumber,  "pets");
+
+        // 2. One-time buff skills
+        for (int skillId : strat.buffSkillIds) {
+            String res = postDamage(mid, skillId, 1);
+            append("INFO", b.name + " buff: " + skillNameFor(skillId));
+            if (!empty(res) && res.contains("not enough mana"))
+                append("WARN", b.name + " buff skipped: not enough mana");
+            sleep(600);
+        }
+
+        // 3. Main attack loop
+        int hits = 0;
+        for (int i = 0; i < strat.mainRepeatCount && running; i++) {
+            if (strat.periodicSkillId > 0 && hits > 0
+                    && strat.periodicEveryN > 0 && hits % strat.periodicEveryN == 0) {
+                postDamage(mid, strat.periodicSkillId, 1);
+                sleep(600);
+            }
+            String res = postDamage(mid, strat.mainSkillId, strat.mainSkillStamCost);
+            if (res == null || res.contains("dead") || res.contains("not enough stamina")) break;
+            hits++;
+        }
+        append("INFO", b.name + " strategy done: " + hits + " hits");
+        sendBroadcast(new Intent("ACTION_BOSS_UPDATED"));
+    }
+
+    // ── Rescan (called via intent from UI) ─────────────────────────────────────
+    void rescanSkills() {
+        rescanRequested = true;
+        try {
+            String battleHtml = null;
+            for (Category c : buildCategories()) {
+                try {
+                    String html = get(c.url, c.url);
+                    String monsterId = first(html, "battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)");
+                    if (!empty(monsterId)) {
+                        battleHtml = get(BATTLE_URL + "?id=" + enc(monsterId), BATTLE_URL);
+                        break;
+                    }
+                } catch (Exception ignored) {}
+            }
+            if (battleHtml == null) {
+                append("WARN", "Rescan: no alive boss found — wait for a boss to spawn");
+                rescanRequested = false;
+                return;
+            }
+            parsePlayerSkills(battleHtml);
+            parseQuickSets(battleHtml);
+            sanitizeStrategies();
+            sendBroadcast(new Intent("ACTION_SKILLS_UPDATED"));
+            append("INFO", "Rescan complete");
+        } catch (Exception e) {
+            append("ERROR", "Rescan failed: " + e.getMessage());
+        }
+        rescanRequested = false;
+    }
+
+    void sanitizeStrategies() {
+        Set<Integer> validIds = new HashSet<>();
+        for (PlayerSkill s : loadSkills()) validIds.add(s.skillId);
+        for (String key : getAllStrategyKeys()) {
+            BossStrategy strat = loadStrategy(key.replace(STRAT_PREFIX, ""));
+            if (strat == null) continue;
+            boolean changed = false;
+            int before = strat.buffSkillIds.size();
+            strat.buffSkillIds.removeIf(id -> !validIds.contains(id));
+            if (strat.buffSkillIds.size() != before) changed = true;
+            if (strat.mainSkillId > 0 && !validIds.contains(strat.mainSkillId)) {
+                strat.mainSkillId = 0; changed = true;
+            }
+            if (strat.periodicSkillId > 0 && !validIds.contains(strat.periodicSkillId)) {
+                strat.periodicSkillId = -1; changed = true;
+            }
+            if (changed) saveStrategy(strat);
+        }
+    }
+
     // ── HTML parsing utils ─────────────────────────────────────────────────────
     private static List<String> extractClassBlocks(String html, String className) {
         List<String> out=new ArrayList<>();
@@ -1078,4 +1323,106 @@ public class BotForegroundService extends Service {
     private static String readAll(InputStream is)throws IOException{if(is==null)return "";ByteArrayOutputStream out=new ByteArrayOutputStream();byte[]b=new byte[8192];int n;while((n=is.read(b))>0)out.write(b,0,n);return out.toString("UTF-8");}
     private static void sleep(long ms)throws InterruptedException{Thread.sleep(ms);}
     private String cookieValue(String name){String cookie=CookieManager.getInstance().getCookie(BASE);if(cookie==null)return "";for(String part:cookie.split(";")){String[]kv=part.trim().split("=",2);if(kv.length==2&&kv[0].equals(name))return kv[1];}return "";}
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  SKILL STRATEGY — INNER MODELS
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    static class PlayerSkill {
+        int skillId, mpCost, stamCost;
+        String name;
+
+        static PlayerSkill fromPipe(String s) {
+            String[] p = s.split("\\|");
+            PlayerSkill sk = new PlayerSkill();
+            sk.skillId  = Integer.parseInt(p[0]);
+            sk.name     = p[1];
+            sk.mpCost   = Integer.parseInt(p[2]);
+            sk.stamCost = Integer.parseInt(p[3]);
+            return sk;
+        }
+        String toPipe() { return skillId + "|" + name + "|" + mpCost + "|" + stamCost; }
+    }
+
+    static class QuickSet {
+        int setNumber;
+        String name, applyType;
+
+        QuickSet() {}
+        QuickSet(int n, String nm, String t) { setNumber = n; name = nm; applyType = t; }
+
+        static QuickSet fromPipe(String s) {
+            String[] p = s.split("\\|");
+            return new QuickSet(Integer.parseInt(p[0]), p[1], p[2]);
+        }
+        String toPipe() { return setNumber + "|" + name + "|" + applyType; }
+    }
+
+    static class BossStrategy {
+        String        bossKey        = "";
+        int           gearSetNumber  = -1;
+        int           petSetNumber   = -1;
+        List<Integer> buffSkillIds   = new ArrayList<>();
+        int           mainSkillId    = 0;
+        int           mainSkillStamCost = 1;
+        int           mainRepeatCount   = 0;
+        int           periodicSkillId   = -1;
+        int           periodicEveryN    = 0;
+
+        boolean isConfigured() { return mainSkillId > 0 && mainRepeatCount > 0; }
+
+        String toJson() {
+            StringBuilder sb = new StringBuilder("{");
+            sb.append("\"bossKey\":\"").append(bossKey).append("\",");
+            sb.append("\"gearSetNumber\":").append(gearSetNumber).append(",");
+            sb.append("\"petSetNumber\":").append(petSetNumber).append(",");
+            sb.append("\"mainSkillId\":").append(mainSkillId).append(",");
+            sb.append("\"mainSkillStamCost\":").append(mainSkillStamCost).append(",");
+            sb.append("\"mainRepeatCount\":").append(mainRepeatCount).append(",");
+            sb.append("\"periodicSkillId\":").append(periodicSkillId).append(",");
+            sb.append("\"periodicEveryN\":").append(periodicEveryN).append(",");
+            sb.append("\"buffSkillIds\":[");
+            for (int i = 0; i < buffSkillIds.size(); i++) {
+                sb.append(buffSkillIds.get(i));
+                if (i < buffSkillIds.size() - 1) sb.append(",");
+            }
+            sb.append("]}");
+            return sb.toString();
+        }
+
+        static BossStrategy fromJson(String json) {
+            BossStrategy s = new BossStrategy();
+            s.bossKey           = jsonStr(json, "bossKey");
+            s.gearSetNumber     = jsonInt(json, "gearSetNumber", -1);
+            s.petSetNumber      = jsonInt(json, "petSetNumber", -1);
+            s.mainSkillId       = jsonInt(json, "mainSkillId", 0);
+            s.mainSkillStamCost = jsonInt(json, "mainSkillStamCost", 1);
+            s.mainRepeatCount   = jsonInt(json, "mainRepeatCount", 0);
+            s.periodicSkillId   = jsonInt(json, "periodicSkillId", -1);
+            s.periodicEveryN    = jsonInt(json, "periodicEveryN", 0);
+            String arr = first(json, "\"buffSkillIds\":\\[([^\\]]*)\\]");
+            if (!empty(arr)) {
+                for (String id : arr.split(","))
+                    if (!id.trim().isEmpty())
+                        try { s.buffSkillIds.add(Integer.parseInt(id.trim())); } catch (Exception ignored) {}
+            }
+            return s;
+        }
+
+        static String jsonStr(String json, String key) {
+            String v = first(json, "\"" + key + "\":\"([^\"]+)\"");
+            return v == null ? "" : v;
+        }
+        static int jsonInt(String json, String key, int def) {
+            String v = first(json, "\"" + key + "\":(-?\\d+)");
+            try { return v == null || v.isEmpty() ? def : Integer.parseInt(v); }
+            catch (NumberFormatException e) { return def; }
+        }
+        // delegates to BotForegroundService static helpers
+        static String first(String s, String re) {
+            Matcher m = Pattern.compile(re).matcher(s == null ? "" : s);
+            return m.find() ? m.group(1) : "";
+        }
+        static boolean empty(String s) { return s == null || s.trim().isEmpty(); }
+    }
 }
