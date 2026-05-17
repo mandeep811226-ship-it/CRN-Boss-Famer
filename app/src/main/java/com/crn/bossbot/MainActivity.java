@@ -1781,35 +1781,34 @@ public class MainActivity extends Activity {
                 android.R.layout.simple_spinner_item, items) {
             @Override
             public View getView(int position, View convertView, android.view.ViewGroup parent) {
-                TextView tv = (TextView) super.getView(position, convertView, parent);
+                // Build TextView from scratch — system layout lets theme override text color
+                TextView tv = new TextView(getContext());
+                tv.setText(getItem(position));
                 tv.setTextColor(C_TEXT);
-                tv.setBackgroundColor(C_CARD);
+                tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14);
+                tv.setBackgroundColor(Color.TRANSPARENT);
                 tv.setPadding(dp(12), dp(10), dp(12), dp(10));
+                tv.setSingleLine(true);
+                tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 return tv;
             }
             @Override
             public View getDropDownView(int position, View convertView, android.view.ViewGroup parent) {
-                TextView tv = (TextView) super.getDropDownView(position, convertView, parent);
-                tv.setTextColor(C_TEXT);
-                tv.setBackgroundColor(C_SURFACE);
+                TextView tv = new TextView(getContext());
+                tv.setText(getItem(position));
+                tv.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, 14);
+                boolean selected = (parent instanceof android.widget.ListView)
+                    && ((android.widget.ListView) parent).getCheckedItemPosition() == position;
+                tv.setTextColor(selected ? C_ACCENT : C_TEXT);
+                tv.setBackgroundColor(selected ? C_CARD : C_SURFACE);
                 tv.setPadding(dp(14), dp(12), dp(14), dp(12));
-                if (position == getSpinnerSelectedPosition(this, parent)) {
-                    tv.setBackgroundColor(C_CARD);
-                    tv.setTextColor(C_ACCENT);
-                }
+                tv.setSingleLine(true);
+                tv.setEllipsize(android.text.TextUtils.TruncateAt.END);
                 return tv;
             }
         };
         adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         return adapter;
-    }
-
-    // Helper to get selected position for dropdown highlight — safe fallback
-    private int getSpinnerSelectedPosition(ArrayAdapter<?> adapter, android.view.ViewGroup parent) {
-        if (parent instanceof android.widget.ListView) {
-            return ((android.widget.ListView) parent).getCheckedItemPosition();
-        }
-        return -1;
     }
 
     private Spinner buildStyledSpinner() {
@@ -2486,3 +2485,4 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(in); else startService(in);
     }
 }
+            
