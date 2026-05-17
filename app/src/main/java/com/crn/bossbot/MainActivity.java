@@ -1367,7 +1367,7 @@ public class MainActivity extends Activity {
         LinearLayout header = row(Gravity.CENTER_VERTICAL);
         header.setPadding(dp(12), dp(10), dp(12), dp(10));
 
-        // Enable/disable toggle
+        // Toggle — enables/disables this strategy without deleting it
         Switch stratSwitch = new Switch(this);
         stratSwitch.setChecked(stratEnabled);
         stratSwitch.setThumbTintList(android.content.res.ColorStateList.valueOf(C_ACCENT));
@@ -1375,8 +1375,12 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams swLp = lpWH(-2, -2);
         swLp.setMargins(0, 0, dp(8), 0);
         stratSwitch.setLayoutParams(swLp);
-        stratSwitch.setOnCheckedChangeListener((v, checked) ->
-            sp.edit().putBoolean(enabledPrefKey, checked).apply());
+        stratSwitch.setOnCheckedChangeListener((v, checked) -> {
+            sp.edit().putBoolean(enabledPrefKey, checked).apply();
+            // Dim card content when disabled so user knows it's off
+            card.setAlpha(checked ? 1f : 0.5f);
+        });
+        // Stop toggle tap from also collapsing/expanding the card
         stratSwitch.setOnTouchListener((v, ev) -> {
             v.getParent().requestDisallowInterceptTouchEvent(true);
             return false;
@@ -1387,6 +1391,9 @@ public class MainActivity extends Activity {
         header.addView(nameTv, lp0(1));
         TextView arrow = txt(hasStrat ? "▲" : "▼", 11, false, C_MUTED);
         header.addView(arrow, lpWH(-2, -2));
+
+        // Apply initial dim state
+        card.setAlpha(stratEnabled ? 1f : 0.5f);
 
         // ── Content (collapsed by default unless strategy saved) ─────────────
         LinearLayout content = new LinearLayout(this);
@@ -1406,8 +1413,7 @@ public class MainActivity extends Activity {
         content.addView(stratLabel("🛡  Gear Set"));
         List<QuickSetEntry> gearSets = loadQuickSetsFromPrefs("quick_sets_gear");
         if (gearSets.isEmpty())
-            for (int i = 1; i <= 6; i++)
-                gearSets.add(new QuickSetEntry(i, "Gear Set " + i, "equipments"));
+            for (int i = 1; i <= 6; i++) gearSets.add(new QuickSetEntry(i, "Gear Set " + i, "equipments"));
         Spinner gearSpinner = buildQuickSetSpinner(gearSets, existing != null ? existing.gearSetNumber : -1);
         content.addView(gearSpinner, stratSpinnerLp());
 
@@ -1415,8 +1421,7 @@ public class MainActivity extends Activity {
         content.addView(stratLabel("🐾  Pet Set"));
         List<QuickSetEntry> petSets = loadQuickSetsFromPrefs("quick_sets_pets");
         if (petSets.isEmpty())
-            for (int i = 1; i <= 6; i++)
-                petSets.add(new QuickSetEntry(i, "Pet Set " + i, "pets"));
+            for (int i = 1; i <= 6; i++) petSets.add(new QuickSetEntry(i, "Pet Set " + i, "pets"));
         Spinner petSpinner = buildQuickSetSpinner(petSets, existing != null ? existing.petSetNumber : -1);
         content.addView(petSpinner, stratSpinnerLp());
 
@@ -1532,45 +1537,47 @@ public class MainActivity extends Activity {
         final TextView[] fSlashBtns = slashBtns;
         final Spinner fClassSkillSpinner = classSkillSpinner;
         final TextView fClassSkillLabel = classSkillLabel;
-        final RadioButton fRadioSlash = radioSlash;
         final int[] fSelectedSlashIdx = selectedSlashIdx;
-        Runnable applyToggle = new Runnable() {
-            @Override public void run() {
-                boolean slashSel = fRadioSlash.isChecked();
 
-                // Slash row: full opacity + active buttons when slash selected
-                fSlashRow.setAlpha(slashSel ? 1f : 0.35f);
-                for (int j = 0; j < fSlashBtns.length; j++) {
-                    fSlashBtns[j].setEnabled(slashSel);
-                    if (slashSel) {
-                        boolean isSel = j == fSelectedSlashIdx[0];
-                        fSlashBtns[j].setBackground(roundRect(
-                            isSel ? C_ACCENT : C_SURFACE, dp(6),
-                            isSel ? C_ACCENT : C_BORDER2));
-                        fSlashBtns[j].setTextColor(isSel ? Color.parseColor("#03090f") : C_TEXT);
-                    } else {
-                        fSlashBtns[j].setBackground(roundRect(C_SURFACE, dp(6), C_BORDER2));
-                        fSlashBtns[j].setTextColor(C_MUTED);
-                    }
+        // Give explicit IDs before setting the listener so checkedId comparisons are reliable
+        radioSlash.setId(View.generateViewId());
+        radioSkill.setId(View.generateViewId());
+
+        // Single group listener — fires on every selection change including re-tapping the active button,
+        // fixing the bug where tapping the already-selected radio a second time did nothing
+        radioGroup.setOnCheckedChangeListener((group, checkedId) -> {
+            boolean slashSelected = (checkedId == radioSlash.getId());
+
+            fSlashRow.setAlpha(slashSelected ? 1f : 0.35f);
+            for (int j = 0; j < fSlashBtns.length; j++) {
+                fSlashBtns[j].setEnabled(slashSelected);
+                if (slashSelected) {
+                    boolean isSel = j == fSelectedSlashIdx[0];
+                    fSlashBtns[j].setBackground(roundRect(
+                        isSel ? C_ACCENT : C_SURFACE, dp(6),
+                        isSel ? C_ACCENT : C_BORDER2));
+                    fSlashBtns[j].setTextColor(isSel ? Color.parseColor("#03090f") : C_TEXT);
+                } else {
+                    fSlashBtns[j].setBackground(roundRect(C_SURFACE, dp(6), C_BORDER2));
+                    fSlashBtns[j].setTextColor(C_MUTED);
                 }
-
-                // Class skill section: dim label + spinner when slash selected
-                fClassSkillLabel.setAlpha(slashSel ? 0.35f : 1f);
-                fClassSkillSpinner.setAlpha(slashSel ? 0.35f : 1f);
-                fClassSkillSpinner.setEnabled(!slashSel);
             }
-        };
-        radioSlash.setOnCheckedChangeListener((v, checked) -> { if (checked) applyToggle.run(); });
-        radioSkill.setOnCheckedChangeListener((v, checked) -> { if (checked) applyToggle.run(); });
-        // Set initial radio state — both sections fully visible on first load
-        // greying only happens after user taps a radio button
-        if (hasStrat && !existing.useStaminaSlash) radioSkill.setChecked(true);
-        else radioSlash.setChecked(true);
+
+            fClassSkillLabel.setAlpha(slashSelected ? 0.35f : 1f);
+            fClassSkillSpinner.setAlpha(slashSelected ? 0.35f : 1f);
+            fClassSkillSpinner.setEnabled(!slashSelected);
+        });
+
+        // Set initial state fully visible BEFORE triggering selection
         fSlashRow.setAlpha(1f);
         for (TextView btn : fSlashBtns) btn.setEnabled(true);
         fClassSkillLabel.setAlpha(1f);
         fClassSkillSpinner.setAlpha(1f);
         fClassSkillSpinner.setEnabled(true);
+
+        // Set radio LAST — triggers the group listener to correctly grey the inactive section
+        if (hasStrat && !existing.useStaminaSlash) radioSkill.setChecked(true);
+        else radioSlash.setChecked(true);
 
         content.addView(stratLabel("Repeat count (hits)"));
         EditText repeatEdit = stratEdit("e.g. 500");
@@ -1848,8 +1855,8 @@ public class MainActivity extends Activity {
         bg.setCornerRadius(dp(8));
         bg.setStroke(dp(1), C_BORDER2);
         s.setBackground(bg);
-        s.setPadding(dp(12), dp(2), dp(12), dp(2));
-        s.setMinimumHeight(dp(46));
+        s.setPadding(dp(4), 0, dp(4), 0);
+        s.setMinimumHeight(dp(44));
         return s;
     }
 
@@ -1865,7 +1872,7 @@ public class MainActivity extends Activity {
         return sp2;
     }
     private TextView stratLabel(String text) {
-        TextView t = txt(text, 10, true, C_TEXT2);
+        TextView t = txt(text, 10, false, C_TEXT2);
         LinearLayout.LayoutParams lp = lpW(-1);
         lp.setMargins(0, dp(10), 0, dp(2));
         t.setLayoutParams(lp);
