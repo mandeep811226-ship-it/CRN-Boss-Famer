@@ -1218,14 +1218,21 @@ public class BotForegroundService extends Service {
 
         // 3. Main attack loop
         int hits = 0;
-        for (int i = 0; i < strat.mainRepeatCount && running; i++) {
+        for (int i = 0; i < strat.repeatCount && running; i++) {
             if (strat.periodicSkillId > 0 && hits > 0
                     && strat.periodicEveryN > 0 && hits % strat.periodicEveryN == 0) {
                 postDamage(mid, strat.periodicSkillId, 1);
                 sleep(600);
             }
-            String res = postDamage(mid, strat.mainSkillId, strat.mainSkillStamCost);
-            if (res == null || res.contains("dead") || res.contains("not enough stamina")) break;
+            String res;
+            if (strat.useStaminaSlash) {
+                res = postDamage(mid, strat.slashSkillId, strat.slashStamCost);
+            } else {
+                res = postDamage(mid, strat.mainClassSkillId, 1);
+            }
+            if (res == null || res.contains("dead")
+                    || res.contains("not enough stamina")
+                    || res.contains("not enough mana")) break;
             hits++;
         }
         append("INFO", b.name + " strategy done: " + hits + " hits");
@@ -1273,8 +1280,9 @@ public class BotForegroundService extends Service {
             int before = strat.buffSkillIds.size();
             strat.buffSkillIds.removeIf(id -> !validIds.contains(id));
             if (strat.buffSkillIds.size() != before) changed = true;
-            if (strat.mainSkillId > 0 && !validIds.contains(strat.mainSkillId)) {
-                strat.mainSkillId = 0; changed = true;
+            // Only validate class skill; slash IDs are hardcoded negatives/zero, always valid
+            if (!strat.useStaminaSlash && strat.mainClassSkillId > 0 && !validIds.contains(strat.mainClassSkillId)) {
+                strat.mainClassSkillId = -1; changed = true;
             }
             if (strat.periodicSkillId > 0 && !validIds.contains(strat.periodicSkillId)) {
                 strat.periodicSkillId = -1; changed = true;
@@ -1363,22 +1371,38 @@ public class BotForegroundService extends Service {
         int           gearSetNumber  = -1;
         int           petSetNumber   = -1;
         List<Integer> buffSkillIds   = new ArrayList<>();
-        int           mainSkillId    = 0;
-        int           mainSkillStamCost = 1;
-        int           mainRepeatCount   = 0;
-        int           periodicSkillId   = -1;
-        int           periodicEveryN    = 0;
 
-        boolean isConfigured() { return mainSkillId > 0 && mainRepeatCount > 0; }
+        // Main attack — one of two modes
+        boolean useStaminaSlash  = true;   // true = stamina slash mode, false = class skill mode
+
+        // Stamina slash mode fields
+        int slashSkillId  = 0;   // 0=Slash, -1=Power, -2=Heroic, -3=Ultimate, -4=Legendary, -5=Worldbreaker
+        int slashStamCost = 1;   // 1, 10, 50, 100, 200, 1000
+
+        // Class skill mode field
+        int mainClassSkillId = -1;  // player class skill id; -1 = none
+
+        // Shared
+        int           repeatCount      = 0;
+        int           periodicSkillId  = -1;
+        int           periodicEveryN   = 0;
+
+        boolean isConfigured() {
+            return repeatCount > 0 &&
+                   (useStaminaSlash ? slashSkillId != Integer.MIN_VALUE
+                                    : mainClassSkillId > 0);
+        }
 
         String toJson() {
             StringBuilder sb = new StringBuilder("{");
             sb.append("\"bossKey\":\"").append(bossKey).append("\",");
             sb.append("\"gearSetNumber\":").append(gearSetNumber).append(",");
             sb.append("\"petSetNumber\":").append(petSetNumber).append(",");
-            sb.append("\"mainSkillId\":").append(mainSkillId).append(",");
-            sb.append("\"mainSkillStamCost\":").append(mainSkillStamCost).append(",");
-            sb.append("\"mainRepeatCount\":").append(mainRepeatCount).append(",");
+            sb.append("\"useStaminaSlash\":").append(useStaminaSlash).append(",");
+            sb.append("\"slashSkillId\":").append(slashSkillId).append(",");
+            sb.append("\"slashStamCost\":").append(slashStamCost).append(",");
+            sb.append("\"mainClassSkillId\":").append(mainClassSkillId).append(",");
+            sb.append("\"repeatCount\":").append(repeatCount).append(",");
             sb.append("\"periodicSkillId\":").append(periodicSkillId).append(",");
             sb.append("\"periodicEveryN\":").append(periodicEveryN).append(",");
             sb.append("\"buffSkillIds\":[");
@@ -1392,14 +1416,29 @@ public class BotForegroundService extends Service {
 
         static BossStrategy fromJson(String json) {
             BossStrategy s = new BossStrategy();
-            s.bossKey           = jsonStr(json, "bossKey");
-            s.gearSetNumber     = jsonInt(json, "gearSetNumber", -1);
-            s.petSetNumber      = jsonInt(json, "petSetNumber", -1);
-            s.mainSkillId       = jsonInt(json, "mainSkillId", 0);
-            s.mainSkillStamCost = jsonInt(json, "mainSkillStamCost", 1);
-            s.mainRepeatCount   = jsonInt(json, "mainRepeatCount", 0);
-            s.periodicSkillId   = jsonInt(json, "periodicSkillId", -1);
-            s.periodicEveryN    = jsonInt(json, "periodicEveryN", 0);
+            s.bossKey          = jsonStr(json, "bossKey");
+            s.gearSetNumber    = jsonInt(json, "gearSetNumber", -1);
+            s.petSetNumber     = jsonInt(json, "petSetNumber", -1);
+            // Boolean: look for "useStaminaSlash":false; default true
+            s.useStaminaSlash  = !json.contains("\"useStaminaSlash\":false");
+            s.slashSkillId     = jsonInt(json, "slashSkillId", 0);
+            s.slashStamCost    = jsonInt(json, "slashStamCost", 1);
+            s.mainClassSkillId = jsonInt(json, "mainClassSkillId", -1);
+            s.repeatCount      = jsonInt(json, "repeatCount", 0);
+            // Legacy migration: if old fields present and repeatCount not set, migrate
+            if (s.repeatCount == 0) {
+                int legacyRepeat = jsonInt(json, "mainRepeatCount", 0);
+                if (legacyRepeat > 0) {
+                    s.repeatCount = legacyRepeat;
+                    int legacySkillId = jsonInt(json, "mainSkillId", 0);
+                    if (legacySkillId > 0) {
+                        s.useStaminaSlash  = false;
+                        s.mainClassSkillId = legacySkillId;
+                    }
+                }
+            }
+            s.periodicSkillId  = jsonInt(json, "periodicSkillId", -1);
+            s.periodicEveryN   = jsonInt(json, "periodicEveryN", 0);
             String arr = first(json, "\"buffSkillIds\":\\[([^\\]]*)\\]");
             if (!empty(arr)) {
                 for (String id : arr.split(","))
