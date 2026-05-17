@@ -1014,7 +1014,12 @@ public class BotForegroundService extends Service {
             }
             InputStream is=code>=400?c.getErrorStream():c.getInputStream();
             String text=readAll(is);
-            if(code==429){append("ERROR","429 cooldown");sleep(5000);}
+            if(code==429){
+                append("WARN","429 rate limit — waiting 5s");
+                sleep(5000);
+                // Return the response so callers can inspect and retry if needed
+                return new HttpResult(code, text);
+            }
             if(code>=400&&!("POST".equals(currentMethod)&&DMG_URL.equals(currentUrl)&&code==400&&looksJson(text))) throw new IOException("HTTP "+code+" "+compact(text));
             return new HttpResult(code,text);
         }
@@ -1263,16 +1268,38 @@ public class BotForegroundService extends Service {
     }
 
     String postDamage(String monsterId, int skillId, int stamCost) {
-        try {
-            String body = "monster_id=" + enc(monsterId)
-                        + "&skill_id=" + enc(String.valueOf(skillId))
-                        + "&stamina_cost=" + enc(String.valueOf(stamCost));
-            HttpResult hr = postRaw(DMG_URL, body, BATTLE_URL + "?id=" + enc(monsterId));
-            return hr.text;
-        } catch (Exception e) {
-            append("ERROR", "postDamage failed: " + e.getMessage());
-            return null;
+        return postDamage(monsterId, skillId, stamCost, 3);
+    }
+
+    String postDamage(String monsterId, int skillId, int stamCost, int maxRetries) {
+        for (int attempt = 1; attempt <= maxRetries && running; attempt++) {
+            try {
+                String body = "monster_id=" + enc(monsterId)
+                            + "&skill_id=" + enc(String.valueOf(skillId))
+                            + "&stamina_cost=" + enc(String.valueOf(stamCost));
+                HttpResult hr = postRaw(DMG_URL, body, BATTLE_URL + "?id=" + enc(monsterId));
+                // Check for 429 in response body (server sometimes returns 200 with error json)
+                if (hr.text != null && hr.text.contains("attacking too quickly")) {
+                    long backoff = 3000L + attempt * 2000L;
+                    append("WARN", "postDamage: rate limited — backing off " + backoff + "ms (attempt " + attempt + "/" + maxRetries + ")");
+                    sleep(backoff);
+                    continue;
+                }
+                return hr.text;
+            } catch (Exception e) {
+                String msg = e.getMessage() == null ? "" : e.getMessage();
+                if (msg.contains("429") || msg.contains("attacking too quickly")) {
+                    long backoff = 3000L + attempt * 2000L;
+                    append("WARN", "postDamage: 429 rate limit — backing off " + backoff + "ms (attempt " + attempt + "/" + maxRetries + ")");
+                    try { sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return null; }
+                } else {
+                    append("ERROR", "postDamage failed: " + msg);
+                    return null;
+                }
+            }
         }
+        append("WARN", "postDamage: gave up after " + maxRetries + " attempts (rate limited)");
+        return null;
     }
 
     void performStrategyAttack(Boss b, BossStrategy strat) throws Exception {
@@ -1288,16 +1315,16 @@ public class BotForegroundService extends Service {
             append("INFO", b.name + " buff: " + skillNameFor(skillId));
             if (!empty(res) && res.contains("not enough mana"))
                 append("WARN", b.name + " buff skipped: not enough mana");
-            sleep(600);
+            sleep(3000 + new Random().nextInt(1000));
         }
 
-        // 3. Main attack loop
+        // 3. Main attack loop — minimum 3s between hits to avoid 429
         int hits = 0;
         for (int i = 0; i < strat.repeatCount && running; i++) {
             if (strat.periodicSkillId > 0 && hits > 0
                     && strat.periodicEveryN > 0 && hits % strat.periodicEveryN == 0) {
                 postDamage(mid, strat.periodicSkillId, 1);
-                sleep(600);
+                sleep(3000 + new Random().nextInt(1000));
             }
             String res;
             if (strat.useStaminaSlash) {
@@ -1309,6 +1336,8 @@ public class BotForegroundService extends Service {
                     || res.contains("not enough stamina")
                     || res.contains("not enough mana")) break;
             hits++;
+            // Minimum 3s delay between hits — randomised to avoid detection
+            if (i < strat.repeatCount - 1) sleep(3000 + new Random().nextInt(1500));
         }
         append("INFO", b.name + " strategy done: " + hits + " hits");
         sendBroadcast(new Intent("ACTION_BOSS_UPDATED"));
