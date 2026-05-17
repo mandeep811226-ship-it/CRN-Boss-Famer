@@ -1360,14 +1360,40 @@ public class MainActivity extends Activity {
 
         StrategyConfig existing = loadStrategyFromPrefs(b.key);
         boolean hasStrat = existing != null;
+        final String enabledPrefKey = "strategy_enabled_" + b.key;
+        boolean stratEnabled = sp.getBoolean(enabledPrefKey, true);
 
         // ── Collapsible header ───────────────────────────────────────────────
         LinearLayout header = row(Gravity.CENTER_VERTICAL);
-        header.setPadding(dp(12), dp(12), dp(12), dp(12));
+        header.setPadding(dp(12), dp(10), dp(12), dp(10));
+
+        // Toggle — enables/disables this strategy without deleting it
+        Switch stratSwitch = new Switch(this);
+        stratSwitch.setChecked(stratEnabled);
+        stratSwitch.setThumbTintList(android.content.res.ColorStateList.valueOf(C_ACCENT));
+        stratSwitch.setTrackTintList(android.content.res.ColorStateList.valueOf(C_SURFACE));
+        LinearLayout.LayoutParams swLp = lpWH(-2, -2);
+        swLp.setMargins(0, 0, dp(8), 0);
+        stratSwitch.setLayoutParams(swLp);
+        stratSwitch.setOnCheckedChangeListener((v, checked) -> {
+            sp.edit().putBoolean(enabledPrefKey, checked).apply();
+            // Dim card content when disabled so user knows it's off
+            card.setAlpha(checked ? 1f : 0.5f);
+        });
+        // Stop toggle tap from also collapsing/expanding the card
+        stratSwitch.setOnTouchListener((v, ev) -> {
+            v.getParent().requestDisallowInterceptTouchEvent(true);
+            return false;
+        });
+        header.addView(stratSwitch);
+
         TextView nameTv = txt("⚔  " + b.name, 13, true, C_TEXT);
         header.addView(nameTv, lp0(1));
         TextView arrow = txt(hasStrat ? "▲" : "▼", 11, false, C_MUTED);
         header.addView(arrow, lpWH(-2, -2));
+
+        // Apply initial dim state
+        card.setAlpha(stratEnabled ? 1f : 0.5f);
 
         // ── Content (collapsed by default unless strategy saved) ─────────────
         LinearLayout content = new LinearLayout(this);
@@ -2485,4 +2511,3 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 26) startForegroundService(in); else startService(in);
     }
 }
-            
