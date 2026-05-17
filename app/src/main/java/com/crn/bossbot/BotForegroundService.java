@@ -204,6 +204,8 @@ public class BotForegroundService extends Service {
     private void loop() {
         append("INFO", "Java engine started.");
         fetchPotions();
+        // Populate quick sets immediately on start — works even with no alive boss
+        new Thread(this::fetchAndSaveQuickSets, "CRN-QuickSets-Init").start();
         while (running) {
             try {
                 if (!sp.getBoolean("global_enabled", false)) {
@@ -239,6 +241,8 @@ public class BotForegroundService extends Service {
                 List<Boss> bosses = fetchBosses();
                 saveBossesForUi(bosses);
                 sp.edit().putLong("last_scan_ms", System.currentTimeMillis()).apply();
+                // Refresh quick sets so spinners populate even with no alive boss
+                fetchAndSaveQuickSets();
                 sendStatus("IDLE", "Initial scan complete", bosses);
             } catch (Exception e) {
                 append("ERROR", "Initial scan failed: " + e.getMessage());
@@ -1150,7 +1154,6 @@ public class BotForegroundService extends Service {
     }
 
     void parseQuickSets(String battleHtml) {
-        if (!empty(sp.getString(GEAR_SETS_KEY, "")) && !rescanRequested) return;
         List<QuickSet> gear = new ArrayList<>();
         List<QuickSet> pets = new ArrayList<>();
         Pattern p = Pattern.compile(
@@ -1166,13 +1169,85 @@ public class BotForegroundService extends Service {
             qs.name      = m.group(3).trim();
             if (qs.applyType.equals("equipments")) gear.add(qs); else pets.add(qs);
         }
-        if (gear.isEmpty())
-            for (int i = 1; i <= 6; i++) gear.add(new QuickSet(i, "Gear Set " + i, "equipments"));
-        if (pets.isEmpty())
-            for (int i = 1; i <= 6; i++) pets.add(new QuickSet(i, "Pet Set " + i, "pets"));
+        // Only save real data; keep existing placeholders if we found nothing real
+        boolean hasRealGear = !gear.isEmpty();
+        boolean hasRealPets = !pets.isEmpty();
+        if (!hasRealGear) {
+            List<QuickSet> existing = loadQuickSets(GEAR_SETS_KEY);
+            if (!existing.isEmpty()) gear = existing;
+            else for (int i = 1; i <= 6; i++) gear.add(new QuickSet(i, "Gear Set " + i, "equipments"));
+        }
+        if (!hasRealPets) {
+            List<QuickSet> existing = loadQuickSets(PET_SETS_KEY);
+            if (!existing.isEmpty()) pets = existing;
+            else for (int i = 1; i <= 6; i++) pets.add(new QuickSet(i, "Pet Set " + i, "pets"));
+        }
         saveQuickSets(gear, GEAR_SETS_KEY);
         saveQuickSets(pets, PET_SETS_KEY);
-        append("INFO", "Quick sets: " + gear.size() + " gear, " + pets.size() + " pets");
+        append("INFO", "Quick sets: " + gear.size() + " gear" + (hasRealGear ? " (real)" : " (placeholder)")
+                + ", " + pets.size() + " pets" + (hasRealPets ? " (real)" : " (placeholder)"));
+        sendBroadcast(new Intent("ACTION_SKILLS_UPDATED"));
+    }
+
+    /**
+     * Tries to fetch and save quick sets from multiple game pages, even when
+     * no boss is alive. Tries: game_dash.php, battle.php (no id), then each
+     * wave page. Always finds something — falls back to generating placeholders
+     * only if every page returns no set data.
+     */
+    void fetchAndSaveQuickSets() {
+        // Pages to try in order — quick sets HTML appears on many game pages
+        String[] urls = {
+            BASE + "/game_dash.php",
+            BASE + "/battle.php",
+        };
+        // Also add the first URL from each wave category
+        List<String> tryUrls = new ArrayList<>(Arrays.asList(urls));
+        for (Category c : buildCategories()) tryUrls.add(c.url);
+
+        for (String url : tryUrls) {
+            try {
+                String html = get(url, url);
+                List<QuickSet> gear = new ArrayList<>();
+                List<QuickSet> pets = new ArrayList<>();
+                Pattern p = Pattern.compile(
+                    "data-set-number=\"(\\d+)\"[^>]*" +
+                    "data-apply-type=\"(equipments|pets)\"[^>]*>" +
+                    "([^<]+)<",
+                    Pattern.CASE_INSENSITIVE);
+                Matcher m = p.matcher(html);
+                while (m.find()) {
+                    QuickSet qs = new QuickSet();
+                    qs.setNumber = Integer.parseInt(m.group(1));
+                    qs.applyType = m.group(2);
+                    qs.name      = m.group(3).trim();
+                    if (qs.applyType.equals("equipments")) gear.add(qs); else pets.add(qs);
+                }
+                if (!gear.isEmpty() || !pets.isEmpty()) {
+                    if (!gear.isEmpty()) saveQuickSets(gear, GEAR_SETS_KEY);
+                    if (!pets.isEmpty()) saveQuickSets(pets, PET_SETS_KEY);
+                    append("INFO", "Quick sets fetched from " + url + ": "
+                            + gear.size() + " gear, " + pets.size() + " pets");
+                    sendBroadcast(new Intent("ACTION_SKILLS_UPDATED"));
+                    return; // found real data — done
+                }
+            } catch (Exception e) {
+                append("WARN", "fetchAndSaveQuickSets failed for " + url + ": " + e.getMessage());
+            }
+        }
+        // No real data found anywhere — generate placeholders if prefs are still empty
+        if (empty(sp.getString(GEAR_SETS_KEY, ""))) {
+            List<QuickSet> gear = new ArrayList<>();
+            for (int i = 1; i <= 6; i++) gear.add(new QuickSet(i, "Gear Set " + i, "equipments"));
+            saveQuickSets(gear, GEAR_SETS_KEY);
+        }
+        if (empty(sp.getString(PET_SETS_KEY, ""))) {
+            List<QuickSet> pets = new ArrayList<>();
+            for (int i = 1; i <= 6; i++) pets.add(new QuickSet(i, "Pet Set " + i, "pets"));
+            saveQuickSets(pets, PET_SETS_KEY);
+        }
+        append("WARN", "Quick sets: no real data found on any page — using placeholders");
+        sendBroadcast(new Intent("ACTION_SKILLS_UPDATED"));
     }
 
     // ── Strategy execution ─────────────────────────────────────────────────────
@@ -1243,22 +1318,55 @@ public class BotForegroundService extends Service {
     void rescanSkills() {
         rescanRequested = true;
         try {
-            String battleHtml = null;
+            String battleHtml    = null;
+            String foundMonsterId = null;
+
+            // Pass 1: look for any monster id on any wave page — alive OR dead.
+            // Dead boss cards also carry a battle.php?id=X link so we can still
+            // load a battle page and scrape skills/quick-sets from it.
             for (Category c : buildCategories()) {
                 try {
                     String html = get(c.url, c.url);
-                    String monsterId = first(html, "battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)");
-                    if (!empty(monsterId)) {
-                        battleHtml = get(BATTLE_URL + "?id=" + enc(monsterId), BATTLE_URL);
+                    // Try alive-boss link first (preferred — more data visible)
+                    String mid = first(html, "battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)");
+                    if (empty(mid)) {
+                        // Also match any monster-card data-monster-id / data-id attribute
+                        mid = firstNonEmpty(
+                            first(html, "data-monster-id=[\"']([0-9]+)[\"']"),
+                            first(html, "data-id=[\"']([0-9]+)[\"']"),
+                            first(html, "[?&]id=([0-9]+)")
+                        );
+                    }
+                    if (!empty(mid)) {
+                        foundMonsterId = mid;
+                        append("INFO", "Rescan: found monster id " + mid + " on " + c.label);
                         break;
                     }
                 } catch (Exception ignored) {}
             }
+
+            // Pass 2: if a monster id was found, join the battle and fetch the page
+            if (!empty(foundMonsterId)) {
+                try {
+                    String userId = cookieValue("demon");
+                    if (!empty(userId)) {
+                        joinBattle(foundMonsterId, userId);
+                        sleep(700);
+                    }
+                    battleHtml = get(BATTLE_URL + "?id=" + enc(foundMonsterId), BATTLE_URL);
+                } catch (Exception e) {
+                    append("WARN", "Rescan: battle page fetch failed — " + e.getMessage());
+                }
+            }
+
             if (battleHtml == null) {
-                append("WARN", "Rescan: no alive boss found — wait for a boss to spawn");
+                append("WARN", "Rescan: no battle page available — quick sets updated, skills unchanged");
+                // Skills need a battle page; nothing we can do. Still refresh quick sets.
+                fetchAndSaveQuickSets();
                 rescanRequested = false;
                 return;
             }
+
             parsePlayerSkills(battleHtml);
             parseQuickSets(battleHtml);
             sanitizeStrategies();
