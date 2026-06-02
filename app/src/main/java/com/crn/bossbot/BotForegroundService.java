@@ -16,15 +16,17 @@ import java.util.*;
 import java.util.regex.*;
 
 public class BotForegroundService extends Service {
-    public static final String ACTION_START         = "START";
-    public static final String ACTION_STOP          = "STOP";
-    public static final String ACTION_STATUS        = "com.crn.bossbot.STATUS";
-    public static final String ACTION_CLEAR_LOGS    = "CLEAR_LOGS";
-    public static final String ACTION_SCAN_ONCE     = "SCAN_ONCE";
-    public static final String ACTION_RELOAD_WAVES  = "RELOAD_WAVES";
-    public static final String ACTION_RESCAN_SKILLS = "RESCAN_SKILLS";
+    public static final String ACTION_START        = "START";
+    public static final String ACTION_STOP         = "STOP";
+    public static final String ACTION_STATUS       = "com.crn.bossbot.STATUS";
+    public static final String ACTION_CLEAR_LOGS   = "CLEAR_LOGS";
+    public static final String ACTION_SCAN_ONCE    = "SCAN_ONCE";
+    public static final String ACTION_RELOAD_WAVES = "RELOAD_WAVES";
 
-    private static final String PREF_CUSTOM_WAVES = "custom_waves_json";
+    private static final String PREF_CUSTOM_WAVES    = "custom_waves_json";
+    // ── Direct monsters — each entry: "prefKey|name|monsterId|cap"
+    private static final String PREF_DIRECT_MONSTERS = "direct_monsters_json";
+    public  static final String ACTION_RELOAD_MONSTERS = "RELOAD_MONSTERS";
 
     private static final int    NOTIF_ID  = 100;
     private static final String CH_MAIN   = "crn_java_main_visible_v2";
@@ -37,16 +39,9 @@ public class BotForegroundService extends Service {
     private static final String HP_POTION_URL = BASE + "/user_heal_potion.php";
     private static final String AUTO_STATUS_URL  = BASE + "/auto_farm_status.php";
     private static final String AUTO_ACTIONS_URL = BASE + "/auto_farm_actions.php";
-    // ── Skill Strategy constants ───────────────────────────────────────────────
-    private static final String QUICK_SET_URL = BASE + "/quick_sets_apply.php";
-    private static final String SKILLS_KEY    = "player_skills";
-    private static final String GEAR_SETS_KEY = "quick_sets_gear";
-    private static final String PET_SETS_KEY  = "quick_sets_pets";
-    private static final String STRAT_PREFIX  = "strategy_";
 
     // ── Runtime state ──────────────────────────────────────────────────────────
     private volatile boolean running = false;
-    private volatile boolean rescanRequested = false;
     private Thread worker;
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock  wifiLock;
@@ -68,26 +63,19 @@ public class BotForegroundService extends Service {
 
     // ── Hardcoded built-in waves ───────────────────────────────────────────────
     private static final Category[] BUILTIN_CATEGORIES = {
-        new Category("grakthar", "Grakthar",  BASE + "/active_wave.php?gate=3&wave=8"),
-        new Category("olympus",  "Olympus",   BASE + "/active_wave.php?gate=5&wave=9"),
-        new Category("hermes", "Hermes",  BASE + "/active_wave.php?gate=5&wave=10"),
+        new Category("grakthar", "Grakthar", BASE + "/active_wave.php?gate=3&wave=8"),
+        new Category("olympus",  "Olympus",  BASE + "/active_wave.php?gate=5&wave=9"),
+        new Category("hermes",   "Hermes",   BASE + "/active_wave.php?gate=5&wave=10"),
     };
 
-    /**
-     * Builds the full category list: builtin + user-added custom waves.
-     * Called fresh on every scan loop so new waves added by the user
-     * are picked up immediately without restarting the service.
-     */
     private Category[] buildCategories() {
         List<Category> list = new ArrayList<>(Arrays.asList(BUILTIN_CATEGORIES));
         String raw = sp.getString(PREF_CUSTOM_WAVES, "");
         if (raw != null && !raw.isEmpty()) {
             for (String line : raw.split("\n")) {
                 String[] parts = line.split("\\|", -1);
-                // parts: prefKey | label | url | emoji
-                if (parts.length >= 3 && !empty(parts[2])) {
+                if (parts.length >= 3 && !empty(parts[2]))
                     list.add(new Category(parts[0], parts[1], parts[2]));
-                }
             }
         }
         return list.toArray(new Category[0]);
@@ -96,6 +84,12 @@ public class BotForegroundService extends Service {
     // ── Data classes ───────────────────────────────────────────────────────────
     static class Boss {
         String categoryKey, categoryLabel, name, image, monsterId, battleId, key, status, timer;
+        String currentPhaseName = "";
+        // ── Direct monster flag ─────────────────────────────────────────────────
+        // true when this Boss was registered manually via "Add Monster" (not parsed
+        // from a wave page). The bot fetches its state directly from battle.php.
+        boolean isDirectMonster = false;
+        // ───────────────────────────────────────────────────────────────────────
         boolean alive, loot, enabled;
         long damage, cap;
     }
@@ -137,10 +131,8 @@ public class BotForegroundService extends Service {
         if (ACTION_STOP.equals(action))         { stopBot(); return START_NOT_STICKY; }
         if (ACTION_CLEAR_LOGS.equals(action))   { clearLogs(); return running ? START_STICKY : START_NOT_STICKY; }
         if (ACTION_SCAN_ONCE.equals(action))    { scanOnceAsync(); return running ? START_STICKY : START_NOT_STICKY; }
-        if (ACTION_RESCAN_SKILLS.equals(action)) { new Thread(this::rescanSkills).start(); return running ? START_STICKY : START_NOT_STICKY; }
-        if (ACTION_RELOAD_WAVES.equals(action)) {
-            // Custom waves are read fresh on every scan via buildCategories() — nothing extra needed
-            append("INFO", "Wave list reloaded — will take effect on next scan.");
+        if (ACTION_RELOAD_WAVES.equals(action) || ACTION_RELOAD_MONSTERS.equals(action)) {
+            append("INFO", "Wave/monster list reloaded — will take effect on next scan.");
             return running ? START_STICKY : START_NOT_STICKY;
         }
         startForeground(NOTIF_ID, notification("CRN Boss Bot", "Starting engine…", false));
@@ -204,8 +196,6 @@ public class BotForegroundService extends Service {
     private void loop() {
         append("INFO", "Java engine started.");
         fetchPotions();
-        // Populate quick sets immediately on start — works even with no alive boss
-        new Thread(this::fetchAndSaveQuickSets, "CRN-QuickSets-Init").start();
         while (running) {
             try {
                 if (!sp.getBoolean("global_enabled", false)) {
@@ -241,8 +231,6 @@ public class BotForegroundService extends Service {
                 List<Boss> bosses = fetchBosses();
                 saveBossesForUi(bosses);
                 sp.edit().putLong("last_scan_ms", System.currentTimeMillis()).apply();
-                // Refresh quick sets so spinners populate even with no alive boss
-                fetchAndSaveQuickSets();
                 sendStatus("IDLE", "Initial scan complete", bosses);
             } catch (Exception e) {
                 append("ERROR", "Initial scan failed: " + e.getMessage());
@@ -251,10 +239,171 @@ public class BotForegroundService extends Service {
         }, "CRN-Initial-Scan").start();
     }
 
-    // ── Fetch & parse ──────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  PHASE SYSTEM — helpers
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Returns true if this boss root has been marked as phase-capable,
+     * either by the user manually toggling it or by auto-detection.
+     */
+    private boolean isPhaseBoss(String root) {
+        return sp.getBoolean("phase_boss_" + root, false);
+    }
+
+    /**
+     * Returns true if the boss's current name matches a phase entry
+     * that the user has marked as PvP type.
+     * Used to skip attacking entirely during PvP phases.
+     */
+    private boolean isBossInPvpPhase(String bossName) {
+        String root     = bossRootKey(bossName);
+        String nameLower = bossName.toLowerCase(Locale.US);
+        if (!isPhaseBoss(root)) return false;
+        int count = sp.getInt("phase_count_" + root, 0);
+        for (int i = 0; i < count; i++) {
+            String type = sp.getString("phase_type_" + root + "_" + i, "pve");
+            String frag = sp.getString("phase_namefrag_" + root + "_" + i, "")
+                           .toLowerCase(Locale.US).trim();
+            if (!empty(frag) && nameLower.contains(frag) && "pvp".equals(type))
+                return true;
+        }
+        return false;
+    }
+
+    /**
+     * Extracts a short matchable keyword from a full phase name.
+     * "Artemis, Lunar Duelist of the Sacred Hunt" → "lunar duelist"
+     * Takes first 3 words after the comma for reliable, non-greedy matching.
+     */
+    private String extractPhaseFragment(String fullName) {
+        if (empty(fullName)) return "";
+        String[] parts = fullName.split(",", 2);
+        if (parts.length < 2) return fullName.toLowerCase(Locale.US).trim();
+        String afterComma = parts[1].trim().toLowerCase(Locale.US);
+        String[] words = afterComma.split("\\s+");
+        int take = Math.min(3, words.length);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < take; i++) {
+            if (sb.length() > 0) sb.append(" ");
+            sb.append(words[i]);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Called from parseBosses() whenever a live monster-card name differs
+     * from the auto-summon-card name for the same root key.
+     *
+     * Guards applied before saving:
+     *   1. URL must be active_wave.php  (not pvp or other page types)
+     *   2. Name must not contain pvp-related keywords
+     *   3. Fragment must not already be recorded
+     *
+     * Auto-marks the boss as phase-capable and saves the new phase entry
+     * with default type "pve". User can switch it to "pvp" in the UI.
+     */
+    private void autoLearnPhase(String root, String summonName,
+                                 String liveCardName, Category category) {
+        // Guard 1: only learn from wave pages
+        if (!category.url.contains("active_wave.php")) {
+            append("INFO", "⚡ Phase change seen for [" + root
+                + "] but not on a wave page — skipped auto-learn.");
+            return;
+        }
+        // Guard 2: PvP keyword guard
+        String lower = liveCardName.toLowerCase(Locale.US);
+        boolean looksPvp = lower.contains("pvp") || lower.contains("arena")
+                        || lower.contains("challenge");
+        if (looksPvp) {
+            append("INFO", "⚡ Phase change for [" + root
+                + "] — PvP keyword guard blocked auto-learn: " + liveCardName);
+            return;
+        }
+
+        String newFrag = extractPhaseFragment(liveCardName);
+        if (empty(newFrag)) return;
+
+        // Guard 3: don't duplicate existing fragments
+        int count = sp.getInt("phase_count_" + root, 0);
+        for (int i = 0; i < count; i++) {
+            String existing = sp.getString("phase_namefrag_" + root + "_" + i, "");
+            if (existing.equalsIgnoreCase(newFrag)) return; // already known
+        }
+
+        SharedPreferences.Editor ed = sp.edit();
+        int idx = count;
+
+        // If first auto-learn: also record phase 1 (from the summon card name)
+        if (count == 0) {
+            String frag0 = extractPhaseFragment(summonName);
+            if (!empty(frag0)) {
+                ed.putString("phase_label_"    + root + "_0", "Phase 1")
+                  .putString("phase_namefrag_" + root + "_0", frag0)
+                  .putString("phase_type_"     + root + "_0", "pve")
+                  .putString("phase_cap_"      + root + "_0", "0")
+                  .putString("phase_source_"   + root + "_0", "auto");
+                idx = 1;
+            }
+        }
+
+        // Save the newly detected phase
+        ed.putBoolean("phase_boss_"      + root,            true)
+          .putString ("phase_label_"    + root + "_" + idx, "Phase " + (idx + 1))
+          .putString ("phase_namefrag_" + root + "_" + idx, newFrag)
+          .putString ("phase_type_"     + root + "_" + idx, "pve")
+          .putString ("phase_cap_"      + root + "_" + idx, "0")
+          .putString ("phase_source_"   + root + "_" + idx, "auto")
+          .putInt    ("phase_count_"    + root,            idx + 1)
+          .apply();
+
+        append("INFO", "⚡ Auto-learned phase for [" + root + "]: \""
+            + newFrag + "\" → Phase " + (idx + 1)
+            + ". Review in wave tab to set cap or mark PvP.");
+    }
+
+    /**
+     * Three-level cap resolution:
+     *   1. Phase boss + name fragment matches a PvE phase → per-phase cap
+     *   2. Phase boss but no fragment matched current name → generic cap (safe fallback)
+     *   3. Non-phase boss → generic single cap
+     *
+     * PvP-typed phases are skipped (bot never attacks them, cap irrelevant).
+     */
+    private long capForBoss(String bossName, String categoryKey) {
+        String root     = bossRootKey(bossName);
+        String nameLower = bossName.toLowerCase(Locale.US);
+
+        if (isPhaseBoss(root)) {
+            int count = sp.getInt("phase_count_" + root, 0);
+            for (int i = 0; i < count; i++) {
+                String type = sp.getString("phase_type_" + root + "_" + i, "pve");
+                if ("pvp".equals(type)) continue; // PvP phase → skip
+
+                String frag = sp.getString("phase_namefrag_" + root + "_" + i, "")
+                               .toLowerCase(Locale.US).trim();
+                if (!empty(frag) && nameLower.contains(frag)) {
+                    long phaseCap = parseCap(
+                        sp.getString("phase_cap_" + root + "_" + i, "0"));
+                    if (phaseCap > 0) return phaseCap;
+                    break; // phase matched but cap = 0 → fall through to generic
+                }
+            }
+            // Phase boss but nothing matched → warn and fall through
+            append("WARN", bossName
+                + ": phase boss — no fragment matched current name, using generic cap.");
+        }
+
+        // Generic single cap (original behaviour — unchanged for simple bosses)
+        String raw = sp.getString("cap_" + categoryKey + "_" + root, "");
+        return parseCap(empty(raw) ? "0" : raw);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  BOSS FETCHING
+    // ═══════════════════════════════════════════════════════════════════════════
     private List<Boss> fetchBosses() throws Exception {
         List<Boss> all = new ArrayList<>();
-        // buildCategories() is called fresh every scan — picks up user-added waves immediately
         for (Category c : buildCategories()) {
             boolean catEnabled = sp.getBoolean("enable_" + c.key, true);
             String html = get(c.url, c.url);
@@ -262,86 +411,74 @@ public class BotForegroundService extends Service {
             all.addAll(parsed);
             append("INFO", c.label + " scan: " + parsed.size() + " boss cards");
         }
-        // ── Fetch battle page for each alive boss to get accurate auto-die timer ──
-        // The wave page's data-next-ts for alive bosses = next spawn time (after cycle),
-        // NOT the auto-die countdown. The real value is in the battle.php autoDieTimer div.
-        boolean parsedSkillsThisScan = false;
+
+        // ── Direct monsters — fetch state individually from battle.php ──────────
+        all.addAll(fetchDirectMonsters());
+        // ────────────────────────────────────────────────────────────────────────
+
+        // Fetch battle page for alive bosses to get accurate auto-die timer
         for (Boss b : all) {
             if (!b.alive) continue;
-
-            // Log clearly when monsterId is missing so the issue is visible in logs
             if (empty(b.monsterId)) {
                 append("WARN", b.name + " alive but monsterId empty — skipping timer fetch");
                 continue;
             }
-
             try {
                 String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
 
-                // Parse skills and quick sets once per scan cycle
-                if (!parsedSkillsThisScan) {
-                    parsePlayerSkills(battleHtml);
-                    parseQuickSets(battleHtml);
-                    parsedSkillsThisScan = true;
-                }
-
-                // Strategy 1 (BEST): window.AUTO_DIE_CFG = { nextDieMs: 1234567 }
-                // This is the authoritative server-set value in a <script> tag
-                String nextDieMsStr = first(battleHtml, "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
+                // Strategy 1: window.AUTO_DIE_CFG = { nextDieMs: ... }
+                String nextDieMsStr = first(battleHtml,
+                    "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
                 if (!empty(nextDieMsStr)) {
                     try {
-                        long epochMs = Long.parseLong(nextDieMsStr.trim());
+                        long epochMs  = Long.parseLong(nextDieMsStr.trim());
                         long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
-                        if (secsLeft > 0 && secsLeft < 86400L * 7) {
+                        if (secsLeft > 0 && secsLeft < 86400L * 7)
                             b.timer = "Auto dies in " + formatSecs(secsLeft);
-                            append("INFO", b.name + " auto-die (cfg): " + formatSecs(secsLeft));
-                        } else if (secsLeft <= 0) {
+                        else if (secsLeft <= 0)
                             b.timer = "Auto dies soon";
-                            append("INFO", b.name + " auto-die: imminent (nextDieMs in past)");
-                        }
-                    } catch (NumberFormatException nfe) {
-                        append("WARN", b.name + " nextDieMs parse failed: " + nextDieMsStr);
-                    }
+                    } catch (NumberFormatException ignored) {}
                 }
 
-                // Strategy 2: autoDieTimer div — only valid when it shows real digits, not "--:--:--"
+                // Strategy 2: autoDieTimer div
                 if (empty(b.timer)) {
-                    String timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
+                    String timerBlock = first(battleHtml,
+                        "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
                     if (empty(timerBlock))
-                        timerBlock = first(battleHtml, "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
-                    String raw = empty(timerBlock) ? "" : first(timerBlock.replaceAll("<[^>]+>", " "), "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                        timerBlock = first(battleHtml,
+                            "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
+                    String raw = empty(timerBlock) ? ""
+                        : first(timerBlock.replaceAll("<[^>]+>", " "),
+                            "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
                     if (!empty(raw)) {
                         String[] tp = raw.trim().split(":");
                         try {
                             long secs = tp.length == 3
-                                ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
-                                : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
+                                ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
+                                : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
                             b.timer = "Auto dies in " + formatSecs(secs);
-                            append("INFO", b.name + " auto-die (div): " + formatSecs(secs));
-                        } catch (NumberFormatException nfe) {
-                            append("WARN", b.name + " auto-die div parse failed: " + raw);
-                        }
+                        } catch (NumberFormatException ignored) {}
                     }
                 }
 
                 // Strategy 3: visible text "AUTO DIES AFTER: 00:50:13"
                 if (empty(b.timer)) {
-                    String raw = first(battleHtml, "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                    String raw = first(battleHtml,
+                        "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
                     if (!empty(raw)) {
                         String[] tp = raw.trim().split(":");
                         try {
                             long secs = tp.length == 3
-                                ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
-                                : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
+                                ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
+                                : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
                             b.timer = "Auto dies in " + formatSecs(secs);
-                            append("INFO", b.name + " auto-die (text): " + formatSecs(secs));
-                        } catch (NumberFormatException nfe) { /* ignore */ }
+                        } catch (NumberFormatException ignored) {}
                     }
                 }
 
-                if (empty(b.timer)) {
-                    append("WARN", b.name + " auto-die: timer not found in battle page (monsterId=" + b.monsterId + ")");
-                }
+                if (empty(b.timer))
+                    append("WARN", b.name + " auto-die: timer not found (id=" + b.monsterId + ")");
+
             } catch (Exception e) {
                 append("ERROR", b.name + " auto-die fetch: " + e.getMessage());
             }
@@ -349,10 +486,134 @@ public class BotForegroundService extends Service {
         return all;
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  DIRECT MONSTERS — fetch state from battle.php by stored monster ID
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /**
+     * Loads all saved direct monsters from SharedPreferences and fetches
+     * their current state (alive/dead, name, damage, HP) from battle.php.
+     *
+     * Storage format (pipe-delimited, one entry per line in PREF_DIRECT_MONSTERS):
+     *   prefKey|displayName|monsterId|cap
+     *
+     * Each entry is turned into a Boss object with isDirectMonster=true.
+     * The bot's selectTarget() and processTarget() handle them identically
+     * to wave-parsed bosses — no special casing needed there.
+     */
+    private List<Boss> fetchDirectMonsters() {
+        List<Boss> list = new ArrayList<>();
+        String raw = sp.getString(PREF_DIRECT_MONSTERS, "");
+        if (raw == null || raw.trim().isEmpty()) return list;
+
+        for (String line : raw.split("\n")) {
+            String[] parts = line.split("\\|", -1);
+            if (parts.length < 3) continue;
+
+            String prefKey   = parts[0].trim();
+            String savedName = parts.length > 1 ? parts[1].trim() : "Direct Monster";
+            String monsterId = parts[2].trim();
+            String capRaw    = parts.length > 3 ? parts[3].trim() : "0";
+
+            if (empty(monsterId)) continue;
+            boolean enabled = sp.getBoolean("monster_enabled_" + prefKey, false);
+
+            Boss b = new Boss();
+            b.isDirectMonster = true;
+            b.categoryKey     = "monsters";
+            b.categoryLabel   = "Monsters";
+            b.monsterId       = monsterId;
+            b.key             = "monsters:" + prefKey;
+            b.name            = savedName;
+            b.alive           = false;
+            b.status          = "CHECKING";
+            b.enabled         = enabled;
+            b.cap             = parseCap(capRaw);
+            b.damage          = 0;
+
+            try {
+                String battleUrl = BATTLE_URL + "?id=" + enc(monsterId);
+                String html = get(battleUrl, battleUrl);
+
+                // ── Parse name from battle page ──────────────────────────────
+                // "Grathmor, First Wallbreaker" is in an <h> tag after MONSTER badge
+                String parsedName = firstNonEmpty(
+                    first(html, "(?is)<h[1-6][^>]*>\\s*(?:<[^>]+>\\s*)?([A-Z][^<]{3,80}?)\\s*(?:</[^>]+>\\s*)?</h[1-6]>"),
+                    first(html, "(?i)class=[\"'][^\"']*monster[^\"']*name[^\"']*[\"'][^>]*>([^<]+)"),
+                    savedName
+                );
+                parsedName = parsedName.replaceAll("(?i)^(monster|boss)\\s*", "").trim();
+                if (!parsedName.isEmpty() && parsedName.length() > 3) b.name = parsedName;
+
+                // ── Alive/dead detection ─────────────────────────────────────
+                // Dead: HP is 0/MAX or page contains death indicators
+                String lowerHtml = html.toLowerCase(Locale.US);
+                boolean isDead = lowerHtml.contains("monster has been defeated")
+                              || lowerHtml.contains("monster is dead")
+                              || lowerHtml.contains("already defeated");
+
+                // HP: "HP 2,400,000,000,000 / 2,400,000,000,000"
+                String hpCurrent = first(html, "(?i)HP[^0-9]{0,10}([0-9][0-9,]+)\\s*/");
+                String hpMax     = first(html, "(?i)HP[^0-9]{0,10}[0-9][0-9,]+\\s*/\\s*([0-9][0-9,]+)");
+                if (!empty(hpCurrent) && !empty(hpMax)) {
+                    long cur = parseLong(hpCurrent);
+                    long max = parseLong(hpMax);
+                    if (cur <= 0 && max > 0) isDead = true;
+                    if (cur > 0) isDead = false;
+                }
+
+                // Also check if the Slash/attack buttons are present = alive
+                boolean hasAttackButtons = lowerHtml.contains("stamina)")
+                                        || lowerHtml.contains("slash");
+                if (!isDead && hasAttackButtons) b.alive = true;
+                if (isDead) { b.alive = false; b.status = "DEAD"; }
+                else        { b.alive = true;  b.status = "ALIVE"; }
+
+                // ── DMG: "DMG: 6,100,819,740" chip on the battle page ────────
+                String dmgStr = first(html, "(?i)DMG[:\\s]+([0-9][0-9,]+)");
+                if (!empty(dmgStr)) b.damage = parseLong(dmgStr);
+
+                // ── Auto-die timer ────────────────────────────────────────────
+                String nextDieMsStr = first(html,
+                    "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
+                if (!empty(nextDieMsStr)) {
+                    try {
+                        long epochMs  = Long.parseLong(nextDieMsStr.trim());
+                        long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
+                        if (secsLeft > 0) b.timer = "Auto dies in " + formatSecs(secsLeft);
+                        else b.timer = "Auto dies soon";
+                    } catch (NumberFormatException ignored) {}
+                }
+
+                // Restore damage from session memory if higher than page value
+                Long mem = aliveDamageByBoss.get(b.key);
+                if (mem != null && mem > b.damage) b.damage = mem;
+
+                append("INFO", "Direct monster [" + b.name + "] id=" + monsterId
+                    + " status=" + b.status + " dmg=" + fmtn(b.damage));
+
+            } catch (Exception e) {
+                append("ERROR", "Direct monster fetch [" + monsterId + "]: " + e.getMessage());
+                b.status = "ERROR";
+            }
+
+            list.add(b);
+        }
+        return list;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  BOSS PARSING  ← phase detection integrated here
+    // ═══════════════════════════════════════════════════════════════════════════
     private List<Boss> parseBosses(String html, Category category, boolean categoryEnabled) {
         List<Boss> list = new ArrayList<>();
 
-        Map<String, String> liveByName = new HashMap<>();
+        // Index all live monster-cards by root key.
+        // If two cards share a root (phase 1 + phase 3 both map to "artemis"),
+        // prefer the data-boss="1" flagged card.
+        Map<String, String> liveByName    = new HashMap<>();
+        Map<String, String> liveFullNames = new HashMap<>(); // root → full card name
+
         for (String card : extractClassBlocks(html, "monster-card")) {
             if ("1".equals(attr(card, "data-dead"))) continue;
             String name = firstNonEmpty(
@@ -361,12 +622,13 @@ public class BotForegroundService extends Service {
                 cleanHtml(first(card, "(?is)<strong[^>]*>(.*?)</strong>")),
                 cleanHtml(first(card, "(?is)<div[^>]+class=[\"'][^\"']*(?:name|title)[^\"']*[\"'][^>]*>(.*?)</div>"))
             );
-            // ── phase-safe key: use root word before first comma or dash ──────
             String key = bossRootKey(name);
             if (empty(key)) continue;
-            String existing = liveByName.get(key);
             boolean isBossFlagged = "1".equals(attr(card, "data-boss"));
-            if (existing == null || isBossFlagged) liveByName.put(key, card);
+            if (liveByName.get(key) == null || isBossFlagged) {
+                liveByName.put(key, card);
+                liveFullNames.put(key, name.replaceAll("(\\.{2,}|\u2026+)$", "").trim());
+            }
         }
 
         for (String summon : extractClassBlocks(html, "auto-summon-card")) {
@@ -381,28 +643,37 @@ public class BotForegroundService extends Service {
                 cleanHtml(first(summon, "(?is)<div[^>]+class=[\"'][^\"']*(?:name|title)[^\"']*[\"'][^>]*>(.*?)</div>"))
             );
             if (empty(b.name)) continue;
-            // Strip website-side truncation ("Boss Name..." or "Boss Name…") baked into HTML
             b.name = b.name.replaceAll("(\\.{2,}|\u2026+)$", "").trim();
 
-            // ── live card match uses root key so phases map to the same slot ──
             String rootKey = bossRootKey(b.name);
             String live    = liveByName.get(rootKey);
-
-            // pref key also uses root key — same across all phases of a boss
             b.key = category.key + ":" + rootKey;
 
             String lowerSummon = summon.toLowerCase(Locale.US);
             String aliveAttr   = firstNonEmpty(attr(summon,"data-alive"), attr(summon,"data_alive"));
-            boolean saysDead   = "1".equals(attr(summon,"data-dead")) || "0".equals(aliveAttr) || lowerSummon.contains("dead");
+            boolean saysDead   = "1".equals(attr(summon,"data-dead")) || "0".equals(aliveAttr)
+                                 || lowerSummon.contains("dead");
             b.alive  = "1".equals(aliveAttr) && !saysDead;
             b.loot   = !b.alive && (lowerSummon.contains("loot") || lowerSummon.contains("claim"));
             b.status = b.alive ? "ALIVE" : "DEAD";
-            b.image  = firstNonEmpty(attr(summon,"data-image"), first(summon,"<img[^>]+src=[\"']([^\"']+)[\"']"));
+            b.image  = firstNonEmpty(attr(summon,"data-image"),
+                        first(summon,"<img[^>]+src=[\"']([^\"']+)[\"']"));
 
             if (b.alive && live != null) {
+                // ── Phase detection ────────────────────────────────────────────
+                // If the live monster-card has a different name than the
+                // auto-summon-card for the same root, the boss has changed phases.
+                String liveCardName = liveFullNames.getOrDefault(rootKey, "");
+                if (!empty(liveCardName) && !liveCardName.equalsIgnoreCase(b.name)) {
+                    b.currentPhaseName = liveCardName;
+                    autoLearnPhase(rootKey, b.name, liveCardName, category);
+                    append("INFO", "⚡ [" + rootKey + "] phase change detected: "
+                        + b.name + " → " + liveCardName);
+                }
+                // ──────────────────────────────────────────────────────────────
+
                 b.monsterId = firstNonEmpty(
                     attr(live,"data-monster-id"), attr(live,"data-id"),
-                    // Handle battle.php?id=123 AND battle.php?gate=3&wave=8&id=123 etc.
                     first(live,"battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)"),
                     first(live,"[?&]id=([0-9]+)"),
                     first(live,"(?:monster_id|monsterId)[^0-9]{0,20}(\\d+)")
@@ -418,13 +689,11 @@ public class BotForegroundService extends Service {
                 if (empty(b.image)) b.image = first(live,"<img[^>]+src=[\"']([^\"']+)[\"']");
             }
 
-            // Fallback: extract monsterId from the summon card's battle.php link
-            // (covers cases where monster-card had no data-monster-id and live was null)
             if (b.alive && empty(b.monsterId))
                 b.monsterId = firstNonEmpty(
-                    first(summon, "battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)"),
-                    first(summon, "[?&]id=([0-9]+)"),
-                    attr(summon, "data-monster-id"), attr(summon, "data-id")
+                    first(summon,"battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)"),
+                    first(summon,"[?&]id=([0-9]+)"),
+                    attr(summon,"data-monster-id"), attr(summon,"data-id")
                 );
 
             b.timer   = parseTimerFromCards(summon, live != null ? live : "");
@@ -440,20 +709,21 @@ public class BotForegroundService extends Service {
                 Boss b = new Boss();
                 b.categoryKey   = category.key;
                 b.categoryLabel = category.label;
-                b.name = firstNonEmpty(attr(live,"data-name"), cleanHtml(first(live,"(?is)<h[1-6][^>]*>(.*?)</h[1-6]>")));
+                b.name = firstNonEmpty(attr(live,"data-name"),
+                    cleanHtml(first(live,"(?is)<h[1-6][^>]*>(.*?)</h[1-6]>")));
                 if (empty(b.name)) continue;
-                // Strip website-side truncation markers
-                b.name = b.name.replaceAll("(\\.{2,}|\u2026+)$", "").trim();
+                b.name = b.name.replaceAll("(\\.{2,}|\u2026+)$","").trim();
                 String rootKey = bossRootKey(b.name);
-                b.key     = category.key + ":" + rootKey;
-                b.alive   = !"1".equals(attr(live,"data-dead"));
-                b.status  = b.alive ? "ALIVE" : "DEAD";
-                b.monsterId = firstNonEmpty(attr(live,"data-monster-id"), attr(live,"data-id"),
+                b.key       = category.key + ":" + rootKey;
+                b.alive     = !"1".equals(attr(live,"data-dead"));
+                b.status    = b.alive ? "ALIVE" : "DEAD";
+                b.monsterId = firstNonEmpty(attr(live,"data-monster-id"),attr(live,"data-id"),
                     first(live,"battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)"),
                     first(live,"[?&]id=([0-9]+)"));
                 b.battleId  = attr(live,"data-battle-id");
                 b.image     = first(live,"<img[^>]+src=[\"']([^\"']+)[\"']");
-                b.damage    = parseLong(firstNonEmpty(attr(live,"data-userdmg"),attr(live,"data-user-dmg"),attr(live,"data-damage")));
+                b.damage    = parseLong(firstNonEmpty(attr(live,"data-userdmg"),
+                    attr(live,"data-user-dmg"),attr(live,"data-damage")));
                 b.timer     = parseTimerFromCards(live, "");
                 b.cap       = capForBoss(b.name, category.key);
                 b.enabled   = categoryEnabled && sp.getBoolean("boss_enabled_" + b.key, false);
@@ -463,8 +733,7 @@ public class BotForegroundService extends Service {
 
         if (list.isEmpty()) {
             Boss b = new Boss();
-            b.categoryKey   = category.key;
-            b.categoryLabel = category.label;
+            b.categoryKey = category.key; b.categoryLabel = category.label;
             b.name    = category.label + " scan placeholder";
             b.key     = category.key + ":placeholder";
             b.enabled = categoryEnabled;
@@ -475,33 +744,40 @@ public class BotForegroundService extends Service {
         return list;
     }
 
-    // ── Target selection ───────────────────────────────────────────────────────
+    // ── Target selection ← PvP phase skip added ────────────────────────────────
     private Boss selectTarget(List<Boss> bosses) {
         for (Boss b : bosses) if (b.enabled && b.loot) return b;
         for (Boss b : bosses) {
             if (!b.enabled || !b.alive || empty(b.monsterId)) continue;
             if (b.cap > 0 && b.damage >= b.cap) continue;
             if (cappedBossSkipKeys.contains(b.key)) continue;
+            // ── Skip if boss is currently in a PvP phase ──────────────────────
+            if (isBossInPvpPhase(b.name)) {
+                append("INFO", b.name + " is in a PvP phase — skipping this target.");
+                continue;
+            }
             return b;
         }
         return null;
     }
 
-    // ── Attack sequence ────────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  ATTACK SEQUENCE  ← Artemis Mark + PvP mid-session check integrated
+    // ═══════════════════════════════════════════════════════════════════════════
     private void processTarget(Boss b) throws Exception {
         if (b.loot) { append("INFO", b.name + ": loot detected"); return; }
         if (attacking) return;
         attacking = true;
         try {
             String userId = cookieValue("demon");
-            if (empty(userId)) { append("ERROR", "No demon cookie. Please reconnect/login first."); return; }
+            if (empty(userId)) { append("ERROR","No demon cookie. Please reconnect/login first."); return; }
 
             long damageCap = capForBoss(b.name, b.categoryKey);
             notifBossName = b.name; notifCap = damageCap; notifDamage = Math.max(0, b.damage);
             update("CRN Boss Bot • TARGET", notificationBody("Target: " + b.name), false);
-            if (damageCap <= 0) { append("INFO", "Skipping " + b.name + ": no damage cap set."); return; }
+            if (damageCap <= 0) { append("INFO","Skipping " + b.name + ": no damage cap set."); return; }
 
-            long totalDamage = b.damage > 0 ? b.damage : fetchDamage(b);
+            long totalDamage  = b.damage > 0 ? b.damage : fetchDamage(b);
             long lastApiTotal = totalDamage;
             int  zeroDamageHits = 0;
             b.damage = totalDamage;
@@ -513,7 +789,8 @@ public class BotForegroundService extends Service {
             update("CRN Boss Bot • ATTACK", notificationBody("Target: " + b.name), false);
 
             long remaining = Math.max(0, damageCap - totalDamage);
-            append("INFO", "Pre-damage: " + fmtn(totalDamage) + " / " + fmtn(damageCap) + "  remaining: " + fmtn(remaining));
+            append("INFO","Pre-damage: " + fmtn(totalDamage) + " / " + fmtn(damageCap)
+                + "  remaining: " + fmtn(remaining));
 
             if (totalDamage >= damageCap) {
                 sleep(800);
@@ -524,85 +801,90 @@ public class BotForegroundService extends Service {
                     aliveDamageByBoss.put(b.key, recheck);
                     cappedBossSkipKeys.add(b.key);
                     saveBossesForUi(Collections.singletonList(b));
-                    append("INFO", "Already capped. Skipping: " + b.name);
+                    append("INFO","Already capped. Skipping: " + b.name);
                     return;
                 }
                 totalDamage = recheck; lastApiTotal = totalDamage;
             }
 
             disableAutoFarmIfRunning();
-            append("INFO", "Joining battle: [" + b.categoryLabel + "] " + b.name);
+            append("INFO","Joining battle: [" + b.categoryLabel + "] " + b.name);
             joinBattle(b.monsterId, userId);
             sleep(700 + new Random().nextInt(600));
 
-            // ── Strategy attack: if a strategy is configured AND enabled, use it ──
-            BossStrategy configuredStrat = loadStrategy(b.key);
-            if (configuredStrat != null && configuredStrat.isConfigured()) {
-                boolean stratOn = sp.getBoolean("strategy_enabled_" + b.key, true);
-                append("INFO", b.name + " strategy found — enabled=" + stratOn
-                    + " slash=" + configuredStrat.useStaminaSlash
-                    + " repeat=" + configuredStrat.repeatCount
-                    + " gear=" + configuredStrat.gearSetNumber
-                    + " pet=" + configuredStrat.petSetNumber
-                    + " buffs=" + configuredStrat.buffSkillIds.size());
-                if (stratOn) {
-                    performStrategyAttack(b, configuredStrat);
-                    return;
-                } else {
-                    append("INFO", b.name + " strategy disabled — using default attack");
-                }
-            } else {
-                if (configuredStrat == null)
-                    append("INFO", b.name + " no strategy saved — using default attack");
-                else
-                    append("WARN", b.name + " strategy incomplete (repeatCount="
-                        + configuredStrat.repeatCount + " mainSkill="
-                        + (configuredStrat.useStaminaSlash ? configuredStrat.slashSkillId
-                                                           : configuredStrat.mainClassSkillId)
-                        + ") — using default attack");
-            }
+            // ── Artemis Mark state ─────────────────────────────────────────────
+            // Detects "artemis marked you for N turns" in attack responses.
+            // Forces SLASH for the duration, bypassing all normal skill logic.
+            // The counter is declared in the outer scope so it survives
+            // stamina-potion `continue` cycles naturally.
+            boolean isArtemis        = b.name.toLowerCase(Locale.US).contains("artemis");
+            int     artemisMarkedTurns = 0;
+            // ──────────────────────────────────────────────────────────────────
 
             int hitCount = 0;
             while (running && sp.getBoolean("global_enabled",false) && totalDamage < damageCap
                            && sp.getBoolean("boss_enabled_" + b.key, false)) {
 
+                // ── PvP phase mid-session guard ────────────────────────────────
+                // Boss can transition to PvP phase during an active attack session.
+                // Check on every hit and bail out cleanly.
+                if (isBossInPvpPhase(b.name)) {
+                    append("INFO", b.name + " transitioned to PvP phase mid-session — stopping.");
+                    break;
+                }
+                // ──────────────────────────────────────────────────────────────
+
+                // ── Skill selection — Artemis Mark overrides everything ─────────
                 Skill configuredSkill = skillFromId(parseInt(sp.getString("skill_id","0"),0));
-                Skill skill = configuredSkill;
+                Skill skill;
 
-                int staminaNow = fetchStaminaForBattle(b.monsterId);
-                if (sp.getBoolean("enable_asterion",false) && staminaNow >= 0) {
-                    int threshold = parseInt(sp.getString("asterion_stamina_threshold","0"),0);
-                    if (threshold > 0 && staminaNow > 0 && staminaNow <= threshold) {
-                        append("INFO","Asterion: stamina "+staminaNow+" <= "+threshold+". Trying potion.");
-                        if (handleStaminaLogic(b.monsterId)) { sleep(900+new Random().nextInt(600)); continue; }
-                    }
-                }
+                if (isArtemis && artemisMarkedTurns > 0) {
+                    // Force Slash (index SKILLS.length-1, skill_id=0, cost=1)
+                    skill = SKILLS[SKILLS.length - 1];
+                    artemisMarkedTurns--;
+                    append("INFO","🛡️ Artemis Mark — forcing SLASH ("
+                        + artemisMarkedTurns + " turns remain)");
+                } else {
+                    skill = configuredSkill;
 
-                if (staminaNow >= 0 && staminaNow < effectiveCostForSkill(skill)) {
-                    if (staminaNow <= 0) {
-                        append("INFO","Stamina 0. Trying potion for "+b.name+".");
-                        if (handleStaminaLogic(b.monsterId)) { sleep(900+new Random().nextInt(600)); continue; }
-                        append("INFO","No potion available. Pausing "+b.name+".");
-                        break;
+                    int staminaNow = fetchStaminaForBattle(b.monsterId);
+                    if (sp.getBoolean("enable_asterion",false) && staminaNow >= 0) {
+                        int threshold = parseInt(sp.getString("asterion_stamina_threshold","0"),0);
+                        if (threshold > 0 && staminaNow > 0 && staminaNow <= threshold) {
+                            append("INFO","Asterion: stamina "+staminaNow+" <= "+threshold+". Trying potion.");
+                            if (handleStaminaLogic(b.monsterId)) { sleep(900+new Random().nextInt(600)); continue; }
+                        }
                     }
-                    Skill staminaSkill = selectAffordableSkill(staminaNow);
-                    if (staminaSkill != null) {
-                        if (effectiveCostForSkill(staminaSkill) != effectiveCostForSkill(skill))
-                            append("INFO","Stamina control: "+skill.name+" -> "+staminaSkill.name);
-                        skill = staminaSkill;
-                    } else if (canUseStaminaPotionAtStamina(staminaNow)) {
-                        append("INFO","No affordable skill for stamina "+staminaNow+". Trying potion.");
-                        if (handleStaminaLogic(b.monsterId)) { sleep(900+new Random().nextInt(600)); continue; }
-                        break;
-                    } else {
-                        append("INFO","No affordable skill, potion blocked by threshold. Waiting.");
-                        break;
+
+                    if (staminaNow >= 0 && staminaNow < effectiveCostForSkill(skill)) {
+                        if (staminaNow <= 0) {
+                            append("INFO","Stamina 0. Trying potion for "+b.name+".");
+                            if (handleStaminaLogic(b.monsterId)) { sleep(900+new Random().nextInt(600)); continue; }
+                            append("INFO","No potion available. Pausing "+b.name+"."); break;
+                        }
+                        Skill staminaSkill = selectAffordableSkill(staminaNow);
+                        if (staminaSkill != null) {
+                            if (effectiveCostForSkill(staminaSkill) != effectiveCostForSkill(skill))
+                                append("INFO","Stamina control: "+skill.name+" -> "+staminaSkill.name);
+                            skill = staminaSkill;
+                        } else if (canUseStaminaPotionAtStamina(staminaNow)) {
+                            append("INFO","No affordable skill for stamina "+staminaNow+". Trying potion.");
+                            if (handleStaminaLogic(b.monsterId)) { sleep(900+new Random().nextInt(600)); continue; }
+                            break;
+                        } else {
+                            append("INFO","No affordable skill, potion blocked by threshold. Waiting."); break;
+                        }
                     }
+                    // staminaNow is local — re-read below for remaining calc
+                    if (skill == null) { append("INFO","No skill after guards. Stopping safely."); break; }
                 }
+                // ──────────────────────────────────────────────────────────────
 
                 if (skill == null) { append("INFO","No skill after guards. Stopping safely."); break; }
                 int effectiveCost = effectiveCostForSkill(skill);
-                if (configuredSkill != null && skill.skill_id != configuredSkill.skill_id)
+                int staminaNow    = sp.getInt("live_stamina", -1); // best available value at this point
+                if (configuredSkill != null && skill.skill_id != configuredSkill.skill_id
+                        && !(isArtemis && artemisMarkedTurns >= 0))
                     append("INFO","Downshifting "+configuredSkill.name+" -> "+skill.name);
                 append("INFO","Skill "+skill.name+" - Damage: "+fmtn(totalDamage)+" / "+fmtn(damageCap));
 
@@ -612,6 +894,23 @@ public class BotForegroundService extends Service {
                 if (res == null || !res.hasJson) { append("INFO","Boss attack stopped: HTTP "+(res==null?0:res.status)); break; }
 
                 String lowerMsg = nullToEmpty(res.message).toLowerCase(Locale.US);
+
+                // ── Artemis Mark detection ─────────────────────────────────────
+                // Runs on every hit response when fighting Artemis.
+                // Regex is case-insensitive; captures turn count directly from server message.
+                if (isArtemis) {
+                    Matcher markMatcher = Pattern.compile(
+                        "artemis marked you for (\\d+) turns?",
+                        Pattern.CASE_INSENSITIVE
+                    ).matcher(nullToEmpty(res.message));
+                    if (markMatcher.find()) {
+                        artemisMarkedTurns = Integer.parseInt(markMatcher.group(1));
+                        append("INFO","⚠️ Artemis Mark detected! Forcing SLASH for next "
+                            + artemisMarkedTurns + " turns.");
+                    }
+                }
+                // ──────────────────────────────────────────────────────────────
+
                 if (lowerMsg.contains("you are dead")) {
                     append("INFO","You are dead."); if (handleHpPotion()) { sleep(900+new Random().nextInt(600)); continue; }
                 }
@@ -630,17 +929,18 @@ public class BotForegroundService extends Service {
                 lastApiTotal = Math.max(lastApiTotal, apiTotal);
 
                 if (hit <= 0) {
-                    append("INFO","[DBG] hitDmg="+res.hitDamage+" logDmg="+res.logDamage+" apiTotal="+res.totalDamage+" msg=\""+compact(res.message)+"\"");
+                    append("INFO","[DBG] hitDmg="+res.hitDamage+" logDmg="+res.logDamage
+                        +" apiTotal="+res.totalDamage+" msg=\""+compact(res.message)+"\"");
                     long after = fetchDamage(b);
                     if (after > totalDamage) { hit = after - totalDamage; append("INFO","Damage delta from post-hit check: +"+fmtn(hit)); }
                 }
 
-                totalDamage += Math.max(0,hit);
+                totalDamage += Math.max(0, hit);
                 if (hit <= 0) zeroDamageHits++; else { zeroDamageHits = 0; hitCount++; }
                 if (hitCount > 0 && hitCount % 5 == 0) {
                     long serverDmg = fetchDamage(b);
                     if (serverDmg > totalDamage) {
-                        append("INFO", "Server sync: local=" + fmtn(totalDamage) + " server=" + fmtn(serverDmg) + " — correcting.");
+                        append("INFO","Server sync: local="+fmtn(totalDamage)+" server="+fmtn(serverDmg)+" — correcting.");
                         totalDamage = serverDmg; b.damage = totalDamage;
                         damageByBoss.put(b.key, totalDamage); aliveDamageByBoss.put(b.key, totalDamage);
                         notifDamage = totalDamage;
@@ -653,19 +953,20 @@ public class BotForegroundService extends Service {
                 saveBossesForUi(Collections.singletonList(b));
                 broadcastUiOnly("DAMAGE", b.name+" "+fmtn(totalDamage)+" / "+fmtn(damageCap));
                 update("CRN Boss Bot • ATTACK", notificationBody("STA "+sp.getInt("live_stamina",-1)), false);
-                append("INFO", (hit>0 ? skill.name+" dealt +"+fmtn(hit)+" damage" : "Attack failed...") + " Total: "+fmtn(totalDamage)+" / "+fmtn(damageCap));
+                append("INFO",(hit>0 ? skill.name+" dealt +"+fmtn(hit)+" damage" : "Attack failed...")+" Total: "+fmtn(totalDamage)+" / "+fmtn(damageCap));
 
                 if (zeroDamageHits >= 3) { append("INFO","3 zero-damage hits. Stopping to prevent stamina burn."); break; }
                 if (totalDamage >= damageCap) { append("INFO","Cap reached: "+fmtn(totalDamage)+" / "+fmtn(damageCap)); cappedBossSkipKeys.add(b.key); break; }
 
-                int remainingStamina = res.stamina >= 0 ? res.stamina : (staminaNow>=0 ? Math.max(0,staminaNow-effectiveCost) : -1);
+                int remainingStamina = res.stamina >= 0 ? res.stamina
+                    : (staminaNow >= 0 ? Math.max(0, staminaNow - effectiveCost) : -1);
                 if (remainingStamina >= 0) saveLiveStamina(remainingStamina);
                 if (remainingStamina == 0) {
                     append("INFO","Stamina 0. Trying potion...");
                     if (!handleStaminaLogic(b.monsterId)) { append("INFO","No usable potion. Pausing attack."); break; }
                     continue;
                 }
-                sleep(1200+new Random().nextInt(1800));
+                sleep(1200 + new Random().nextInt(1800));
             }
         } finally { attacking = false; }
     }
@@ -774,7 +1075,7 @@ public class BotForegroundService extends Service {
             if(ps.large!=null) ids.add("LSP="+ps.large.invId);
             if(ps.full!=null)  ids.add("FSP="+ps.full.invId);
             if(ps.hp!=null)    ids.add("HP="+ps.hp.invId);
-            append("INFO","Potion IDs: "+ joinStrings(ids,", "));
+            append("INFO","Potion IDs: "+joinStrings(ids,", "));
         }
         return ps;
     }
@@ -845,68 +1146,22 @@ public class BotForegroundService extends Service {
     }
 
     private String parseTimerFromCards(String card1, String card2) {
-        String summon  = card1 == null ? "" : card1;
-        String live    = card2 == null ? "" : card2;
-        String combined = summon + live;
-
-        String aliveVal = firstNonEmpty(attr(summon, "data-alive"), attr(summon, "data_alive"));
-        boolean isAlive = "1".equals(aliveVal);
-
-        // ── DEAD/waiting bosses only: data-next-ts = next spawn Unix timestamp ──
-        // NOTE: for ALIVE bosses, data-next-ts is the NEXT SPAWN time (after this
-        // cycle ends), NOT the auto-die time. Auto-die is fetched from battle.php
-        // in fetchBosses() and written directly to b.timer — do NOT use it here.
+        String summon=card1==null?"":card1; String live=card2==null?"":card2; String combined=summon+live;
+        String aliveVal=firstNonEmpty(attr(summon,"data-alive"),attr(summon,"data_alive"));
+        boolean isAlive="1".equals(aliveVal);
         if (!isAlive) {
-            String nextTs = firstNonEmpty(attr(summon, "data-next-ts"), attr(combined, "data-next-ts"));
-            if (!empty(nextTs)) {
-                long ts = parseLong(nextTs);
-                if (ts > 0) {
-                    long nowSec = System.currentTimeMillis() / 1000;
-                    long diff = ts - nowSec;
-                    if (diff > 0 && diff < 86400L * 30) return "Spawns in " + formatSecs(diff);
-                }
-            }
-
-            // ── auto-summon-timer span text (e.g. "4m 58s", "10h 30m 34s") ────
-            String spanTimer = first(combined, "(?is)class=[\"'][^\"']*auto-summon-timer[^\"']*[\"'][^>]*>\\s*([^<]+)");
-            if (!empty(spanTimer)) return "Spawns in " + spanTimer.trim();
-
-            // ── Fallback data attributes for dead bosses ──────────────────────
-            String raw = firstNonEmpty(
-                attr(combined, "data-timer"),
-                attr(combined, "data-respawn"),
-                attr(combined, "data-respawn-time"),
-                attr(combined, "data-countdown"),
-                attr(combined, "data-time-remaining")
-            );
-            if (!empty(raw)) {
-                if (raw.matches("[0-9]{1,3}:[0-9]{2}:[0-9]{2}") || raw.matches("[0-9]{1,2}:[0-9]{2}")) return "Spawns in " + raw;
-                long secs = parseLong(raw);
-                if (secs > 0 && secs < 86400L * 7) return "Spawns in " + formatSecs(secs);
-            }
+            String nextTs=firstNonEmpty(attr(summon,"data-next-ts"),attr(combined,"data-next-ts"));
+            if (!empty(nextTs)){long ts=parseLong(nextTs);if(ts>0){long nowSec=System.currentTimeMillis()/1000;long diff=ts-nowSec;if(diff>0&&diff<86400L*30) return "Spawns in "+formatSecs(diff);}}
+            String spanTimer=first(combined,"(?is)class=[\"'][^\"']*auto-summon-timer[^\"']*[\"'][^>]*>\\s*([^<]+)");
+            if (!empty(spanTimer)) return "Spawns in "+spanTimer.trim();
+            String raw=firstNonEmpty(attr(combined,"data-timer"),attr(combined,"data-respawn"),attr(combined,"data-respawn-time"),attr(combined,"data-countdown"),attr(combined,"data-time-remaining"));
+            if (!empty(raw)){if(raw.matches("[0-9]{1,3}:[0-9]{2}:[0-9]{2}")||raw.matches("[0-9]{1,2}:[0-9]{2}")) return "Spawns in "+raw; long secs=parseLong(raw);if(secs>0&&secs<86400L*7) return "Spawns in "+formatSecs(secs);}
         }
-
-        // ── autoDieTimer from battle page (passed in live when available) ─────
-        String dieTimer = first(combined, "(?is)id=[\"']autoDieTimer[\"'][^>]*>\\s*([0-9:]+)");
-        if (!empty(dieTimer)) {
-            try {
-                String[] tp = dieTimer.trim().split(":");
-                long secs = tp.length == 3
-                    ? Long.parseLong(tp[0]) * 3600 + Long.parseLong(tp[1]) * 60 + Long.parseLong(tp[2])
-                    : Long.parseLong(tp[0]) * 60 + Long.parseLong(tp[1]);
-                return "Auto dies in " + formatSecs(secs);
-            } catch (Exception ignored) { return "Auto dies in " + dieTimer.trim(); }
-        }
-
+        String dieTimer=first(combined,"(?is)id=[\"']autoDieTimer[\"'][^>]*>\\s*([0-9:]+)");
+        if (!empty(dieTimer)){try{String[] tp=dieTimer.trim().split(":");long secs=tp.length==3?Long.parseLong(tp[0])*3600+Long.parseLong(tp[1])*60+Long.parseLong(tp[2]):Long.parseLong(tp[0])*60+Long.parseLong(tp[1]);return "Auto dies in "+formatSecs(secs);}catch(Exception ignored){return "Auto dies in "+dieTimer.trim();}}
         return "";
     }
-    private String formatSecs(long secs) {
-        if (secs <= 0) return "";
-        long h = secs / 3600, m = (secs % 3600) / 60, s = secs % 60;
-        if (h > 0) return h + "h " + m + "m";
-        if (m > 0) return m + "m " + s + "s";
-        return s + "s";
-    }
+    private String formatSecs(long secs){if(secs<=0)return "";long h=secs/3600,m=(secs%3600)/60,s=secs%60;if(h>0)return h+"h "+m+"m";if(m>0)return m+"m "+s+"s";return s+"s";}
 
     // ── Skill helpers ──────────────────────────────────────────────────────────
     private Skill selectAffordableSkill(int stamina) { for(Skill s:SKILLS) if(effectiveCostForSkill(s)<=stamina) return s; return null; }
@@ -914,34 +1169,18 @@ public class BotForegroundService extends Service {
     private int effectiveCostForSkill(Skill skill) { int base=skill==null?0:skill.stamina_cost; return sp.getBoolean("enable_asterion",false)?Math.max(1,(int)Math.round(base*2.5d)):base; }
 
     // ── Cap helpers ────────────────────────────────────────────────────────────
-    /**
-     * Cap key uses the root key (before comma/dash) so all phases of a boss
-     * share the same user-configured cap.
-     */
-    private long capForBoss(String bossName, String categoryKey) {
-        String root = bossRootKey(bossName);
-        String raw  = sp.getString("cap_" + categoryKey + "_" + root, "");
-        if (empty(raw)) raw = "0";
-        return parseCap(raw);
-    }
     private long parseCap(String v) {
         if(v==null) return 0;
         String s=v.trim().toLowerCase(Locale.US).replace(",","");
         try { double mult=1; if(s.endsWith("k")){mult=1_000d;s=s.substring(0,s.length()-1);} else if(s.endsWith("m")){mult=1_000_000d;s=s.substring(0,s.length()-1);} else if(s.endsWith("b")){mult=1_000_000_000d;s=s.substring(0,s.length()-1);} return (long)(Double.parseDouble(s)*mult); } catch(Exception e){return 0;}
     }
-
-    /**
-     * Root key: everything before the first ',' or '-', normalised.
-     * "Hermes, Ascended Herald…" → "hermes"
-     * "Oceanus The Water Titan"  → "oceanus_the_water_titan"  (no comma/dash)
-     */
     private static String bossRootKey(String name) {
-        if (name == null || name.isEmpty()) return "";
-        String[] parts = name.split("[,\\-]", 2);
+        if(name==null||name.isEmpty()) return "";
+        String[] parts=name.split("[,\\-]",2);
         return norm(parts[0].trim());
     }
 
-    // ── UI broadcast & notifications ───────────────────────────────────────────
+    // ── UI broadcast ── saveBossesForUi now saves slot 9 = currentPhaseName ───
     private void saveBossesForUi(List<Boss> bosses) {
         LinkedHashMap<String,String[]> merged=new LinkedHashMap<>();
         String existing=sp.getString("last_bosses","");
@@ -952,547 +1191,74 @@ public class BotForegroundService extends Service {
             }
         }
         for (Boss b:bosses) {
-            String[] row=new String[]{b.categoryLabel,b.name,b.status,String.valueOf(b.damage),String.valueOf(b.cap),String.valueOf(b.enabled),nullToEmpty(b.image),nullToEmpty(b.categoryKey),nullToEmpty(b.timer)};
+            // Slot layout: 0=catLabel 1=name 2=status 3=damage 4=cap 5=enabled
+            //              6=image   7=catKey  8=timer  9=currentPhaseName
+            //              10=isDirectMonster
+            String[] row=new String[]{
+                b.categoryLabel, b.name, b.status,
+                String.valueOf(b.damage), String.valueOf(b.cap), String.valueOf(b.enabled),
+                nullToEmpty(b.image), nullToEmpty(b.categoryKey),
+                nullToEmpty(b.timer), nullToEmpty(b.currentPhaseName),
+                b.isDirectMonster ? "1" : "0"
+            };
             merged.put((b.categoryLabel+":"+norm(b.name)).toLowerCase(Locale.US),row);
         }
         StringBuilder sb=new StringBuilder();
         for (String[] row:merged.values()) {
             if(sb.length()>0) sb.append("\n");
-            sb.append(row[0]).append("|").append(row[1]).append("|").append(row[2]).append("|").append(row[3]).append("|").append(row[4]).append("|").append(row[5]).append("|").append(row.length>6?row[6]:"").append("|").append(row.length>7?row[7]:"").append("|").append(row.length>8?row[8]:"");
+            sb.append(row[0]).append("|").append(row[1]).append("|").append(row[2])
+              .append("|").append(row[3]).append("|").append(row[4]).append("|").append(row[5])
+              .append("|").append(row.length>6?row[6]:"")
+              .append("|").append(row.length>7?row[7]:"")
+              .append("|").append(row.length>8?row[8]:"")
+              .append("|").append(row.length>9?row[9]:"")
+              .append("|").append(row.length>10?row[10]:"0");
         }
         sp.edit().putString("last_bosses",sb.toString()).apply();
     }
-    private void broadcastUiOnly(String state, String msg) {
-        Intent i=new Intent(ACTION_STATUS); i.setPackage(getPackageName());
-        i.putExtra("state",state); i.putExtra("message",msg==null?"":msg); i.putExtra("logs",joinLogs());
-        sendBroadcast(i);
-    }
-    private void sendStatus(String state, String msg, List<Boss> bosses) {
-        update("CRN Boss Bot • "+state, notificationBody(msg), state.equals("TARGET"));
-        sp.edit().putString("ui_state",state).putString("ui_message",msg==null?"":msg).apply();
-        Intent i=new Intent(ACTION_STATUS); i.setPackage(getPackageName());
-        i.putExtra("state",state); i.putExtra("message",msg); i.putExtra("logs",joinLogs());
-        if(bosses!=null) saveBossesForUi(bosses);
-        sendBroadcast(i);
-    }
-    private void append(String type, String msg) {
-        String line=new SimpleDateFormat("HH:mm:ss",Locale.US).format(new Date())+" ["+type+"] "+msg;
-        synchronized(logs){logs.add(line); while(logs.size()>500) logs.remove(0);}
-        sp.edit().putString("logs",joinLogs()).apply();
-        Intent i=new Intent(ACTION_STATUS); i.setPackage(getPackageName());
-        i.putExtra("state","LOG"); i.putExtra("message",msg); i.putExtra("logs",joinLogs());
-        sendBroadcast(i);
-    }
-    private void clearLogs() {
-        synchronized(logs){logs.clear();}
-        sp.edit().putString("logs","").apply();
-        Intent i=new Intent(ACTION_STATUS); i.setPackage(getPackageName());
-        i.putExtra("state","LOG"); i.putExtra("message","Logs cleared"); i.putExtra("logs","");
-        sendBroadcast(i);
-    }
-    private String notificationBody(String msg) {
-        StringBuilder b=new StringBuilder();
-        if(!empty(msg)) b.append(msg);
-        int sta=sp==null?-1:sp.getInt("live_stamina",-1);
-        if(sta>=0){if(b.length()>0)b.append("\n");b.append("STA: ").append(sta);}
-        if(!empty(notifBossName)&&notifCap>0){if(b.length()>0)b.append("\n");b.append(shortText(notifBossName,36)).append(": ").append(fmtn(notifDamage)).append(" / ").append(fmtn(notifCap));}
-        return b.length()==0?"Service running":b.toString();
-    }
+    private void broadcastUiOnly(String state, String msg){Intent i=new Intent(ACTION_STATUS);i.setPackage(getPackageName());i.putExtra("state",state);i.putExtra("message",msg==null?"":msg);i.putExtra("logs",joinLogs());sendBroadcast(i);}
+    private void sendStatus(String state,String msg,List<Boss> bosses){update("CRN Boss Bot • "+state,notificationBody(msg),state.equals("TARGET"));sp.edit().putString("ui_state",state).putString("ui_message",msg==null?"":msg).apply();Intent i=new Intent(ACTION_STATUS);i.setPackage(getPackageName());i.putExtra("state",state);i.putExtra("message",msg);i.putExtra("logs",joinLogs());if(bosses!=null)saveBossesForUi(bosses);sendBroadcast(i);}
+    private void append(String type,String msg){String line=new SimpleDateFormat("HH:mm:ss",Locale.US).format(new Date())+" ["+type+"] "+msg;synchronized(logs){logs.add(line);while(logs.size()>500)logs.remove(0);}sp.edit().putString("logs",joinLogs()).apply();Intent i=new Intent(ACTION_STATUS);i.setPackage(getPackageName());i.putExtra("state","LOG");i.putExtra("message",msg);i.putExtra("logs",joinLogs());sendBroadcast(i);}
+    private void clearLogs(){synchronized(logs){logs.clear();}sp.edit().putString("logs","").apply();Intent i=new Intent(ACTION_STATUS);i.setPackage(getPackageName());i.putExtra("state","LOG");i.putExtra("message","Logs cleared");i.putExtra("logs","");sendBroadcast(i);}
+    private String notificationBody(String msg){StringBuilder b=new StringBuilder();if(!empty(msg))b.append(msg);int sta=sp==null?-1:sp.getInt("live_stamina",-1);if(sta>=0){if(b.length()>0)b.append("\n");b.append("STA: ").append(sta);}if(!empty(notifBossName)&&notifCap>0){if(b.length()>0)b.append("\n");b.append(shortText(notifBossName,36)).append(": ").append(fmtn(notifDamage)).append(" / ").append(fmtn(notifCap));}return b.length()==0?"Service running":b.toString();}
     private String joinLogs(){synchronized(logs){return android.text.TextUtils.join("\n",logs);}}
     private String fmtn(long n){return String.format(Locale.US,"%,d",n);}
     private String shortText(String s,int max){return s==null?"":(s.length()<=max?s:s.substring(0,Math.max(0,max-1))+"…");}
 
     // ── HTTP ───────────────────────────────────────────────────────────────────
-    private String get(String url, String referer) throws Exception { return request("GET",url,null,referer).text; }
-    private String post(String url, String body, String referer) throws Exception { return request("POST",url,body,referer).text; }
-    private HttpResult postRaw(String url, String body, String referer) throws Exception { return request("POST",url,body,referer); }
-    private HttpResult request(String method, String url, String body, String referer) throws Exception {
-        String currentUrl=url, currentMethod=method, currentBody=body;
-        for (int redirects=0; redirects<=5; redirects++) {
-            HttpURLConnection c=(HttpURLConnection)new URL(currentUrl).openConnection();
-            c.setInstanceFollowRedirects(false);
-            c.setRequestMethod(currentMethod);
-            c.setConnectTimeout(20000); c.setReadTimeout(30000);
-            c.setRequestProperty("Accept","*/*");
-            c.setRequestProperty("Accept-Language","en-US,en;q=0.9");
-            c.setRequestProperty("User-Agent","Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36");
-            c.setRequestProperty("Referer",referer==null?BASE+"/":referer);
-            String cookie=CookieManager.getInstance().getCookie(BASE);
-            if(!empty(cookie)) c.setRequestProperty("Cookie",cookie);
-            if(currentBody!=null){c.setDoOutput(true);c.setRequestProperty("Content-Type","application/x-www-form-urlencoded; charset=UTF-8");try(OutputStream os=c.getOutputStream()){os.write(currentBody.getBytes(StandardCharsets.UTF_8));}}
-            int code=c.getResponseCode();
-            String setCookie=c.getHeaderField("Set-Cookie");
-            if(!empty(setCookie)){CookieManager.getInstance().setCookie(BASE,setCookie);CookieManager.getInstance().flush();}
-            if(code==301||code==302||code==303||code==307||code==308){
-                String location=c.getHeaderField("Location");
-                if(empty(location)) throw new IOException("HTTP "+code+" redirect without Location");
-                URL next=new URL(new URL(currentUrl),location);
-                append("INFO","HTTP redirect "+code+" -> "+next.getPath());
-                currentUrl=next.toString();
-                if(code==303||((code==301||code==302)&&"POST".equals(currentMethod))){currentMethod="GET";currentBody=null;}
-                continue;
-            }
-            InputStream is=code>=400?c.getErrorStream():c.getInputStream();
-            String text=readAll(is);
-            if(code==429){
-                append("WARN","429 rate limit — waiting 5s");
-                sleep(5000);
-                // Return the response so callers can inspect and retry if needed
-                return new HttpResult(code, text);
-            }
-            if(code>=400&&!("POST".equals(currentMethod)&&DMG_URL.equals(currentUrl)&&code==400&&looksJson(text))) throw new IOException("HTTP "+code+" "+compact(text));
+    private String get(String url,String referer) throws Exception{return request("GET",url,null,referer).text;}
+    private String post(String url,String body,String referer) throws Exception{return request("POST",url,body,referer).text;}
+    private HttpResult postRaw(String url,String body,String referer) throws Exception{return request("POST",url,body,referer);}
+    private HttpResult request(String method,String url,String body,String referer) throws Exception {
+        String currentUrl=url,currentMethod=method,currentBody=body;
+        for(int redirects=0;redirects<=5;redirects++){
+            HttpURLConnection c=(HttpURLConnection)new URL(currentUrl).openConnection();c.setInstanceFollowRedirects(false);c.setRequestMethod(currentMethod);c.setConnectTimeout(20000);c.setReadTimeout(30000);c.setRequestProperty("Accept","*/*");c.setRequestProperty("Accept-Language","en-US,en;q=0.9");c.setRequestProperty("User-Agent","Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36");c.setRequestProperty("Referer",referer==null?BASE+"/":referer);String cookie=CookieManager.getInstance().getCookie(BASE);if(!empty(cookie))c.setRequestProperty("Cookie",cookie);if(currentBody!=null){c.setDoOutput(true);c.setRequestProperty("Content-Type","application/x-www-form-urlencoded; charset=UTF-8");try(OutputStream os=c.getOutputStream()){os.write(currentBody.getBytes(StandardCharsets.UTF_8));}}
+            int code=c.getResponseCode();String setCookie=c.getHeaderField("Set-Cookie");if(!empty(setCookie)){CookieManager.getInstance().setCookie(BASE,setCookie);CookieManager.getInstance().flush();}
+            if(code==301||code==302||code==303||code==307||code==308){String location=c.getHeaderField("Location");if(empty(location))throw new IOException("HTTP "+code+" redirect without Location");URL next=new URL(new URL(currentUrl),location);append("INFO","HTTP redirect "+code+" -> "+next.getPath());currentUrl=next.toString();if(code==303||((code==301||code==302)&&"POST".equals(currentMethod))){currentMethod="GET";currentBody=null;}continue;}
+            InputStream is=code>=400?c.getErrorStream():c.getInputStream();String text=readAll(is);if(code==429){append("ERROR","429 cooldown");sleep(5000);}
+            if(code>=400&&!("POST".equals(currentMethod)&&DMG_URL.equals(currentUrl)&&code==400&&looksJson(text)))throw new IOException("HTTP "+code+" "+compact(text));
             return new HttpResult(code,text);
         }
         throw new IOException("Too many redirects: "+url);
     }
 
     // ── Notifications ──────────────────────────────────────────────────────────
-    private Notification notification(String title, String body, boolean alert) {
-        Intent open=new Intent(this,MainActivity.class);
-        PendingIntent pi=PendingIntent.getActivity(this,0,open,PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
-        Intent stop=new Intent(this,BotForegroundService.class).setAction(ACTION_STOP);
-        PendingIntent stopPi=PendingIntent.getService(this,2,stop,PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);
-        Notification.Builder b=Build.VERSION.SDK_INT>=26?new Notification.Builder(this,alert?CH_ALERT:CH_MAIN):new Notification.Builder(this);
-        b.setContentTitle(title).setContentText(body).setStyle(new Notification.BigTextStyle().bigText(body))
-         .setSmallIcon(R.drawable.ic_stat_crn).setContentIntent(pi).setOngoing(!alert)
-         .addAction(android.R.drawable.ic_menu_close_clear_cancel,"Stop",stopPi);
-        b.setVisibility(Notification.VISIBILITY_PUBLIC).setCategory(Notification.CATEGORY_SERVICE)
-         .setShowWhen(true).setOnlyAlertOnce(!alert).setPriority(alert?Notification.PRIORITY_HIGH:Notification.PRIORITY_DEFAULT);
-        if(Build.VERSION.SDK_INT>=31) b.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);
-        return b.build();
-    }
-    private void update(String title, String body, boolean alert) {
-        NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
-        nm.notify(alert?101:NOTIF_ID,notification(title,body,alert));
-        if(alert&&sp.getBoolean("alerts",true)) maybeAlert();
-    }
-    private void maybeAlert() {
-        long now=System.currentTimeMillis(); if(now-lastAlertMs<60000) return; lastAlertMs=now;
-        try{Vibrator v=(Vibrator)getSystemService(VIBRATOR_SERVICE); if(v!=null) v.vibrate(VibrationEffect.createOneShot(450,VibrationEffect.DEFAULT_AMPLITUDE)); RingtoneManager.getRingtone(getApplicationContext(),android.provider.Settings.System.DEFAULT_NOTIFICATION_URI).play();}catch(Exception ignored){}
-    }
-    private void createChannels() {
-        if(Build.VERSION.SDK_INT<26) return;
-        NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);
-        NotificationChannel mainCh=new NotificationChannel(CH_MAIN,"CRN Boss Bot Running",NotificationManager.IMPORTANCE_DEFAULT);
-        mainCh.setSound(null,null); mainCh.setShowBadge(false); mainCh.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC); nm.createNotificationChannel(mainCh);
-        NotificationChannel alertCh=new NotificationChannel(CH_ALERT,"CRN Boss Alerts",NotificationManager.IMPORTANCE_HIGH);
-        alertCh.enableVibration(true); alertCh.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);
-        alertCh.setSound(android.provider.Settings.System.DEFAULT_NOTIFICATION_URI,new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build());
-        nm.createNotificationChannel(alertCh);
-    }
-    private void releaseLocks() {
-        try{if(wakeLock!=null&&wakeLock.isHeld()) wakeLock.release();}catch(Exception ignored){}
-        try{if(wifiLock!=null&&wifiLock.isHeld()) wifiLock.release();}catch(Exception ignored){}
-        wakeLock=null; wifiLock=null;
-    }
-    private long nextDelayMs() {
-        long baseMs=Math.max(10,parseInt(sp.getString("scan_interval","60"),60))*1000L;
-        if(!sp.getBoolean("smart_delay",true)) return baseMs;
-        return baseMs+1500+new Random().nextInt(2500);
-    }
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  SKILL STRATEGY SYSTEM
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    // ── Prefs I/O ──────────────────────────────────────────────────────────────
-    List<PlayerSkill> loadSkills() {
-        List<PlayerSkill> list = new ArrayList<>();
-        String raw = sp.getString(SKILLS_KEY, "");
-        if (empty(raw)) return list;
-        for (String line : raw.split("\n"))
-            if (!line.trim().isEmpty())
-                try { list.add(PlayerSkill.fromPipe(line.trim())); } catch (Exception ignored) {}
-        return list;
-    }
-
-    List<QuickSet> loadQuickSets(String key) {
-        List<QuickSet> list = new ArrayList<>();
-        String raw = sp.getString(key, "");
-        if (empty(raw)) return list;
-        for (String line : raw.split("\n"))
-            if (!line.trim().isEmpty())
-                try { list.add(QuickSet.fromPipe(line.trim())); } catch (Exception ignored) {}
-        return list;
-    }
-
-    void saveQuickSets(List<QuickSet> sets, String key) {
-        StringBuilder sb = new StringBuilder();
-        for (QuickSet qs : sets) sb.append(qs.toPipe()).append("\n");
-        sp.edit().putString(key, sb.toString().trim()).apply();
-    }
-
-    BossStrategy loadStrategy(String bossKey) {
-        String json = sp.getString(STRAT_PREFIX + bossKey, "");
-        if (empty(json)) return null;
-        return BossStrategy.fromJson(json);
-    }
-
-    void saveStrategy(BossStrategy s) {
-        sp.edit().putString(STRAT_PREFIX + s.bossKey, s.toJson()).apply();
-    }
-
-    void clearStrategy(String bossKey) {
-        sp.edit().remove(STRAT_PREFIX + bossKey).apply();
-    }
-
-    String skillNameFor(int skillId) {
-        for (PlayerSkill s : loadSkills()) if (s.skillId == skillId) return s.name;
-        return "Skill#" + skillId;
-    }
-
-    List<String> getAllStrategyKeys() {
-        List<String> keys = new ArrayList<>();
-        Map<String, ?> all = sp.getAll();
-        for (String k : all.keySet()) if (k.startsWith(STRAT_PREFIX)) keys.add(k);
-        return keys;
-    }
-
-    // ── HTML scraping ──────────────────────────────────────────────────────────
-    void parsePlayerSkills(String battleHtml) {
-        if (!empty(sp.getString(SKILLS_KEY, "")) && !rescanRequested) return;
-        List<PlayerSkill> found = new ArrayList<>();
-        Pattern p = Pattern.compile(
-            "data-skill-id=\"(\\d+)\"[^>]*" +
-            "data-skill-name=\"([^\"]+)\"[^>]*" +
-            "data-stam-cost=\"(\\d+)\"" +
-            "[\\s\\S]{0,400}?" +
-            "skill-cost[^>]*>([^<]+)<",
-            Pattern.CASE_INSENSITIVE);
-        Matcher m = p.matcher(battleHtml);
-        while (m.find()) {
-            PlayerSkill s = new PlayerSkill();
-            s.skillId = Integer.parseInt(m.group(1));
-            s.name    = m.group(2).trim();
-            String costRaw = m.group(4).trim().toUpperCase(Locale.US);
-            int costVal = Integer.parseInt(costRaw.replaceAll("[^0-9]", ""));
-            if (costRaw.contains("MP")) { s.mpCost = costVal; s.stamCost = 0; }
-            else                        { s.stamCost = costVal; s.mpCost = 0; }
-            found.add(s);
-        }
-        if (!found.isEmpty()) {
-            StringBuilder sb = new StringBuilder();
-            for (PlayerSkill s : found) sb.append(s.toPipe()).append("\n");
-            sp.edit().putString(SKILLS_KEY, sb.toString().trim()).apply();
-            append("INFO", "Skills saved: " + found.size() + " found");
-        }
-    }
-
-    void parseQuickSets(String battleHtml) {
-        List<QuickSet> gear = new ArrayList<>();
-        List<QuickSet> pets = new ArrayList<>();
-        Pattern p = Pattern.compile(
-            "data-set-number=\"(\\d+)\"[^>]*" +
-            "data-apply-type=\"(equipments|pets)\"[^>]*>" +
-            "([^<]+)<",
-            Pattern.CASE_INSENSITIVE);
-        Matcher m = p.matcher(battleHtml);
-        while (m.find()) {
-            QuickSet qs = new QuickSet();
-            qs.setNumber = Integer.parseInt(m.group(1));
-            qs.applyType = m.group(2);
-            qs.name      = m.group(3).trim();
-            if (qs.applyType.equals("equipments")) gear.add(qs); else pets.add(qs);
-        }
-        // Only save real data; keep existing placeholders if we found nothing real
-        boolean hasRealGear = !gear.isEmpty();
-        boolean hasRealPets = !pets.isEmpty();
-        if (!hasRealGear) {
-            List<QuickSet> existing = loadQuickSets(GEAR_SETS_KEY);
-            if (!existing.isEmpty()) gear = existing;
-            else for (int i = 1; i <= 6; i++) gear.add(new QuickSet(i, "Gear Set " + i, "equipments"));
-        }
-        if (!hasRealPets) {
-            List<QuickSet> existing = loadQuickSets(PET_SETS_KEY);
-            if (!existing.isEmpty()) pets = existing;
-            else for (int i = 1; i <= 6; i++) pets.add(new QuickSet(i, "Pet Set " + i, "pets"));
-        }
-        saveQuickSets(gear, GEAR_SETS_KEY);
-        saveQuickSets(pets, PET_SETS_KEY);
-        append("INFO", "Quick sets: " + gear.size() + " gear" + (hasRealGear ? " (real)" : " (placeholder)")
-                + ", " + pets.size() + " pets" + (hasRealPets ? " (real)" : " (placeholder)"));
-        sendBroadcast(new Intent("ACTION_SKILLS_UPDATED"));
-    }
-
-    /**
-     * Tries to fetch and save quick sets from multiple game pages, even when
-     * no boss is alive. Tries: game_dash.php, battle.php (no id), then each
-     * wave page. Always finds something — falls back to generating placeholders
-     * only if every page returns no set data.
-     */
-    void fetchAndSaveQuickSets() {
-        // Pages to try in order — quick sets HTML appears on many game pages
-        String[] urls = {
-            BASE + "/game_dash.php",
-            BASE + "/battle.php",
-        };
-        // Also add the first URL from each wave category
-        List<String> tryUrls = new ArrayList<>(Arrays.asList(urls));
-        for (Category c : buildCategories()) tryUrls.add(c.url);
-
-        for (String url : tryUrls) {
-            try {
-                String html = get(url, url);
-                List<QuickSet> gear = new ArrayList<>();
-                List<QuickSet> pets = new ArrayList<>();
-                Pattern p = Pattern.compile(
-                    "data-set-number=\"(\\d+)\"[^>]*" +
-                    "data-apply-type=\"(equipments|pets)\"[^>]*>" +
-                    "([^<]+)<",
-                    Pattern.CASE_INSENSITIVE);
-                Matcher m = p.matcher(html);
-                while (m.find()) {
-                    QuickSet qs = new QuickSet();
-                    qs.setNumber = Integer.parseInt(m.group(1));
-                    qs.applyType = m.group(2);
-                    qs.name      = m.group(3).trim();
-                    if (qs.applyType.equals("equipments")) gear.add(qs); else pets.add(qs);
-                }
-                if (!gear.isEmpty() || !pets.isEmpty()) {
-                    if (!gear.isEmpty()) saveQuickSets(gear, GEAR_SETS_KEY);
-                    if (!pets.isEmpty()) saveQuickSets(pets, PET_SETS_KEY);
-                    append("INFO", "Quick sets fetched from " + url + ": "
-                            + gear.size() + " gear, " + pets.size() + " pets");
-                    sendBroadcast(new Intent("ACTION_SKILLS_UPDATED"));
-                    return; // found real data — done
-                }
-            } catch (Exception e) {
-                append("WARN", "fetchAndSaveQuickSets failed for " + url + ": " + e.getMessage());
-            }
-        }
-        // No real data found anywhere — generate placeholders if prefs are still empty
-        if (empty(sp.getString(GEAR_SETS_KEY, ""))) {
-            List<QuickSet> gear = new ArrayList<>();
-            for (int i = 1; i <= 6; i++) gear.add(new QuickSet(i, "Gear Set " + i, "equipments"));
-            saveQuickSets(gear, GEAR_SETS_KEY);
-        }
-        if (empty(sp.getString(PET_SETS_KEY, ""))) {
-            List<QuickSet> pets = new ArrayList<>();
-            for (int i = 1; i <= 6; i++) pets.add(new QuickSet(i, "Pet Set " + i, "pets"));
-            saveQuickSets(pets, PET_SETS_KEY);
-        }
-        append("WARN", "Quick sets: no real data found on any page — using placeholders");
-        sendBroadcast(new Intent("ACTION_SKILLS_UPDATED"));
-    }
-
-    // ── Strategy execution ─────────────────────────────────────────────────────
-    void applyQuickSet(int setNumber, String applyType) {
-        String body = "set_number=" + setNumber + "&target_set=attack&apply_type=" + applyType;
-        try {
-            postRaw(QUICK_SET_URL, body, BATTLE_URL);
-            append("INFO", "Quick set applied: " + applyType + " #" + setNumber);
-            sleep(800);
-        } catch (Exception e) {
-            append("ERROR", "Quick set failed: " + e.getMessage());
-        }
-    }
-
-    String postDamage(String monsterId, int skillId, int stamCost) {
-        return postDamage(monsterId, skillId, stamCost, 3);
-    }
-
-    String postDamage(String monsterId, int skillId, int stamCost, int maxRetries) {
-        for (int attempt = 1; attempt <= maxRetries && running; attempt++) {
-            try {
-                String body = "monster_id=" + enc(monsterId)
-                            + "&skill_id=" + enc(String.valueOf(skillId))
-                            + "&stamina_cost=" + enc(String.valueOf(stamCost));
-                HttpResult hr = postRaw(DMG_URL, body, BATTLE_URL + "?id=" + enc(monsterId));
-                // Check for 429 in response body (server sometimes returns 200 with error json)
-                if (hr.text != null && hr.text.contains("attacking too quickly")) {
-                    long backoff = 3000L + attempt * 2000L;
-                    append("WARN", "postDamage: rate limited — backing off " + backoff + "ms (attempt " + attempt + "/" + maxRetries + ")");
-                    sleep(backoff);
-                    continue;
-                }
-                return hr.text;
-            } catch (Exception e) {
-                String msg = e.getMessage() == null ? "" : e.getMessage();
-                if (msg.contains("429") || msg.contains("attacking too quickly")) {
-                    long backoff = 3000L + attempt * 2000L;
-                    append("WARN", "postDamage: 429 rate limit — backing off " + backoff + "ms (attempt " + attempt + "/" + maxRetries + ")");
-                    try { sleep(backoff); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); return null; }
-                } else {
-                    append("ERROR", "postDamage failed: " + msg);
-                    return null;
-                }
-            }
-        }
-        append("WARN", "postDamage: gave up after " + maxRetries + " attempts (rate limited)");
-        return null;
-    }
-
-    void performStrategyAttack(Boss b, BossStrategy strat) throws Exception {
-        String mid = b.monsterId;
-        append("INFO", b.name + " strategy START — monsterId=" + mid);
-
-        // 1. Apply quick sets
-        if (strat.gearSetNumber > 0) {
-            append("INFO", b.name + " applying gear set #" + strat.gearSetNumber);
-            applyQuickSet(strat.gearSetNumber, "equipments");
-        }
-        if (strat.petSetNumber > 0) {
-            append("INFO", b.name + " applying pet set #" + strat.petSetNumber);
-            applyQuickSet(strat.petSetNumber, "pets");
-        }
-
-        // 2. One-time buff skills
-        for (int skillId : strat.buffSkillIds) {
-            append("INFO", b.name + " firing buff: " + skillNameFor(skillId) + " (id=" + skillId + ")");
-            String res = postDamage(mid, skillId, 1);
-            if (!empty(res) && res.contains("not enough mana"))
-                append("WARN", b.name + " buff skipped: not enough mana");
-            else if (empty(res))
-                append("WARN", b.name + " buff got null/empty response");
-            sleep(3000 + new Random().nextInt(1000));
-        }
-
-        // 3. Main attack loop — minimum 3s between hits to avoid 429
-        int hits = 0;
-        append("INFO", b.name + " main loop START — mode="
-            + (strat.useStaminaSlash ? "slash id=" + strat.slashSkillId + " sta=" + strat.slashStamCost
-                                     : "classSkill id=" + strat.mainClassSkillId)
-            + " repeat=" + strat.repeatCount);
-        for (int i = 0; i < strat.repeatCount && running; i++) {
-            if (strat.periodicSkillId > 0 && hits > 0
-                    && strat.periodicEveryN > 0 && hits % strat.periodicEveryN == 0) {
-                append("INFO", b.name + " periodic buff at hit " + hits + ": " + skillNameFor(strat.periodicSkillId));
-                postDamage(mid, strat.periodicSkillId, 1);
-                sleep(3000 + new Random().nextInt(1000));
-            }
-            String res;
-            if (strat.useStaminaSlash) {
-                res = postDamage(mid, strat.slashSkillId, strat.slashStamCost);
-            } else {
-                res = postDamage(mid, strat.mainClassSkillId, 1);
-            }
-            if (res == null || res.contains("dead")
-                    || res.contains("not enough stamina")
-                    || res.contains("not enough mana")) {
-                append("INFO", b.name + " loop stopped at hit " + hits + ": " + res);
-                break;
-            }
-            hits++;
-            if (i < strat.repeatCount - 1) sleep(3000 + new Random().nextInt(1500));
-        }
-        append("INFO", b.name + " strategy done: " + hits + " hits");
-        sendBroadcast(new Intent("ACTION_BOSS_UPDATED"));
-    }
-
-    // ── Rescan (called via intent from UI) ─────────────────────────────────────
-    void rescanSkills() {
-        rescanRequested = true;
-        try {
-            String battleHtml    = null;
-            String foundMonsterId = null;
-
-            // Pass 1: look for any monster id on any wave page — alive OR dead.
-            // Dead boss cards also carry a battle.php?id=X link so we can still
-            // load a battle page and scrape skills/quick-sets from it.
-            for (Category c : buildCategories()) {
-                try {
-                    String html = get(c.url, c.url);
-                    // Try alive-boss link first (preferred — more data visible)
-                    String mid = first(html, "battle\\.php\\?(?:[^\"'<>]*?&)?id=([0-9]+)");
-                    if (empty(mid)) {
-                        // Also match any monster-card data-monster-id / data-id attribute
-                        mid = firstNonEmpty(
-                            first(html, "data-monster-id=[\"']([0-9]+)[\"']"),
-                            first(html, "data-id=[\"']([0-9]+)[\"']"),
-                            first(html, "[?&]id=([0-9]+)")
-                        );
-                    }
-                    if (!empty(mid)) {
-                        foundMonsterId = mid;
-                        append("INFO", "Rescan: found monster id " + mid + " on " + c.label);
-                        break;
-                    }
-                } catch (Exception ignored) {}
-            }
-
-            // Pass 2: if a monster id was found, join the battle and fetch the page
-            if (!empty(foundMonsterId)) {
-                try {
-                    String userId = cookieValue("demon");
-                    if (!empty(userId)) {
-                        joinBattle(foundMonsterId, userId);
-                        sleep(700);
-                    }
-                    battleHtml = get(BATTLE_URL + "?id=" + enc(foundMonsterId), BATTLE_URL);
-                } catch (Exception e) {
-                    append("WARN", "Rescan: battle page fetch failed — " + e.getMessage());
-                }
-            }
-
-            if (battleHtml == null) {
-                append("WARN", "Rescan: no battle page available — quick sets updated, skills unchanged");
-                // Skills need a battle page; nothing we can do. Still refresh quick sets.
-                fetchAndSaveQuickSets();
-                rescanRequested = false;
-                return;
-            }
-
-            parsePlayerSkills(battleHtml);
-            parseQuickSets(battleHtml);
-            sanitizeStrategies();
-            sendBroadcast(new Intent("ACTION_SKILLS_UPDATED"));
-            append("INFO", "Rescan complete");
-        } catch (Exception e) {
-            append("ERROR", "Rescan failed: " + e.getMessage());
-        }
-        rescanRequested = false;
-    }
-
-    void sanitizeStrategies() {
-        Set<Integer> validIds = new HashSet<>();
-        for (PlayerSkill s : loadSkills()) validIds.add(s.skillId);
-        for (String key : getAllStrategyKeys()) {
-            BossStrategy strat = loadStrategy(key.replace(STRAT_PREFIX, ""));
-            if (strat == null) continue;
-            boolean changed = false;
-            int before = strat.buffSkillIds.size();
-            strat.buffSkillIds.removeIf(id -> !validIds.contains(id));
-            if (strat.buffSkillIds.size() != before) changed = true;
-            // Only validate class skill; slash IDs are hardcoded negatives/zero, always valid
-            if (!strat.useStaminaSlash && strat.mainClassSkillId > 0 && !validIds.contains(strat.mainClassSkillId)) {
-                strat.mainClassSkillId = -1; changed = true;
-            }
-            if (strat.periodicSkillId > 0 && !validIds.contains(strat.periodicSkillId)) {
-                strat.periodicSkillId = -1; changed = true;
-            }
-            if (changed) saveStrategy(strat);
-        }
-    }
+    private Notification notification(String title,String body,boolean alert){Intent open=new Intent(this,MainActivity.class);PendingIntent pi=PendingIntent.getActivity(this,0,open,PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);Intent stop=new Intent(this,BotForegroundService.class).setAction(ACTION_STOP);PendingIntent stopPi=PendingIntent.getService(this,2,stop,PendingIntent.FLAG_IMMUTABLE|PendingIntent.FLAG_UPDATE_CURRENT);Notification.Builder b=Build.VERSION.SDK_INT>=26?new Notification.Builder(this,alert?CH_ALERT:CH_MAIN):new Notification.Builder(this);b.setContentTitle(title).setContentText(body).setStyle(new Notification.BigTextStyle().bigText(body)).setSmallIcon(R.drawable.ic_stat_crn).setContentIntent(pi).setOngoing(!alert).addAction(android.R.drawable.ic_menu_close_clear_cancel,"Stop",stopPi);b.setVisibility(Notification.VISIBILITY_PUBLIC).setCategory(Notification.CATEGORY_SERVICE).setShowWhen(true).setOnlyAlertOnce(!alert).setPriority(alert?Notification.PRIORITY_HIGH:Notification.PRIORITY_DEFAULT);if(Build.VERSION.SDK_INT>=31)b.setForegroundServiceBehavior(Notification.FOREGROUND_SERVICE_IMMEDIATE);return b.build();}
+    private void update(String title,String body,boolean alert){NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);nm.notify(alert?101:NOTIF_ID,notification(title,body,alert));if(alert&&sp.getBoolean("alerts",true))maybeAlert();}
+    private void maybeAlert(){long now=System.currentTimeMillis();if(now-lastAlertMs<60000)return;lastAlertMs=now;try{Vibrator v=(Vibrator)getSystemService(VIBRATOR_SERVICE);if(v!=null)v.vibrate(VibrationEffect.createOneShot(450,VibrationEffect.DEFAULT_AMPLITUDE));RingtoneManager.getRingtone(getApplicationContext(),android.provider.Settings.System.DEFAULT_NOTIFICATION_URI).play();}catch(Exception ignored){}}
+    private void createChannels(){if(Build.VERSION.SDK_INT<26)return;NotificationManager nm=(NotificationManager)getSystemService(NOTIFICATION_SERVICE);NotificationChannel mainCh=new NotificationChannel(CH_MAIN,"CRN Boss Bot Running",NotificationManager.IMPORTANCE_DEFAULT);mainCh.setSound(null,null);mainCh.setShowBadge(false);mainCh.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);nm.createNotificationChannel(mainCh);NotificationChannel alertCh=new NotificationChannel(CH_ALERT,"CRN Boss Alerts",NotificationManager.IMPORTANCE_HIGH);alertCh.enableVibration(true);alertCh.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC);alertCh.setSound(android.provider.Settings.System.DEFAULT_NOTIFICATION_URI,new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_NOTIFICATION).build());nm.createNotificationChannel(alertCh);}
+    private void releaseLocks(){try{if(wakeLock!=null&&wakeLock.isHeld())wakeLock.release();}catch(Exception ignored){}try{if(wifiLock!=null&&wifiLock.isHeld())wifiLock.release();}catch(Exception ignored){}wakeLock=null;wifiLock=null;}
+    private long nextDelayMs(){long baseMs=Math.max(10,parseInt(sp.getString("scan_interval","60"),60))*1000L;if(!sp.getBoolean("smart_delay",true))return baseMs;return baseMs+1500+new Random().nextInt(2500);}
 
     // ── HTML parsing utils ─────────────────────────────────────────────────────
-    private static List<String> extractClassBlocks(String html, String className) {
-        List<String> out=new ArrayList<>();
-        if(html==null) return out;
-        Pattern startPat=Pattern.compile("(?is)<div\\b(?=[^>]*class=[\"'][^\"']*"+Pattern.quote(className)+"[^\"']*[\"'])[^>]*>");
-        Matcher m=startPat.matcher(html);
-        while(m.find()){
-            int start=m.start(),pos=m.end(),depth=1;
-            Matcher tags=Pattern.compile("(?is)</?div\\b[^>]*>").matcher(html);
-            tags.region(pos,html.length());
-            int end=-1;
-            while(tags.find()){String tag=tags.group().toLowerCase(Locale.US); if(tag.startsWith("</"))depth--;else depth++; if(depth==0){end=tags.end();break;}}
-            if(end>start) out.add(html.substring(start,end));
-        }
-        return out;
-    }
-    private static String attr(String html, String name) {
-        if(html==null||name==null) return "";
-        Matcher m=Pattern.compile("(?is)\\b"+Pattern.quote(name)+"\\s*=\\s*([\"'])(.*?)\\1").matcher(html);
-        if(m.find()) return cleanHtml(m.group(2));
-        m=Pattern.compile("(?is)\\b"+Pattern.quote(name)+"\\s*=\\s*([^\\s>]+)").matcher(html);
-        return m.find()?cleanHtml(m.group(1)):"";
-    }
+    private static List<String> extractClassBlocks(String html,String className){List<String> out=new ArrayList<>();if(html==null)return out;Pattern startPat=Pattern.compile("(?is)<div\\b(?=[^>]*class=[\"'][^\"']*"+Pattern.quote(className)+"[^\"']*[\"'])[^>]*>");Matcher m=startPat.matcher(html);while(m.find()){int start=m.start(),pos=m.end(),depth=1;Matcher tags=Pattern.compile("(?is)</?div\\b[^>]*>").matcher(html);tags.region(pos,html.length());int end=-1;while(tags.find()){String tag=tags.group().toLowerCase(Locale.US);if(tag.startsWith("</"))depth--;else depth++;if(depth==0){end=tags.end();break;}}if(end>start)out.add(html.substring(start,end));}return out;}
+    private static String attr(String html,String name){if(html==null||name==null)return "";Matcher m=Pattern.compile("(?is)\\b"+Pattern.quote(name)+"\\s*=\\s*([\"'])(.*?)\\1").matcher(html);if(m.find())return cleanHtml(m.group(2));m=Pattern.compile("(?is)\\b"+Pattern.quote(name)+"\\s*=\\s*([^\\s>]+)").matcher(html);return m.find()?cleanHtml(m.group(1)):"";}
     private static String firstNonEmpty(String... values){if(values==null)return "";for(String v:values)if(!empty(v))return v.trim();return "";}
     private static String first(String s,String re){Matcher m=Pattern.compile(re).matcher(s==null?"":s);return m.find()?m.group(1):"";}
     private static String cleanHtml(String s){return(s==null?"":s).replaceAll("(?is)<script.*?</script>","").replaceAll("<[^>]+>"," ").replace("&nbsp;"," ").replace("&amp;","&").replaceAll("\\s+"," ").trim();}
     private static String norm(String s){return(s==null?"":s).toLowerCase(Locale.US).replaceAll("[^a-z0-9]+","_").replaceAll("^_+|_+$","");}
     private static String stripTags(String s){if(s==null)return "";return s.replaceAll("(?is)<script.*?</script>"," ").replaceAll("(?is)<style.*?</style>"," ").replaceAll("(?is)<[^>]+>"," ").replace("&nbsp;"," ").replace("&amp;","&").replaceAll("\\s+"," ").trim();}
-    private static String joinStrings(List<String> items, String sep){StringBuilder sb=new StringBuilder();for(String item:items){if(sb.length()>0)sb.append(sep);sb.append(item);}return sb.toString();}
+    private static String joinStrings(List<String> items,String sep){StringBuilder sb=new StringBuilder();for(String item:items){if(sb.length()>0)sb.append(sep);sb.append(item);}return sb.toString();}
     private static long parseLong(String s){try{return Long.parseLong((s==null?"0":s).replaceAll("[^0-9]",""));}catch(Exception e){return 0;}}
     private static int parseInt(String s,int d){try{return Integer.parseInt(s.trim());}catch(Exception e){return d;}}
     private static boolean empty(String s){return s==null||s.trim().isEmpty();}
@@ -1504,137 +1270,4 @@ public class BotForegroundService extends Service {
     private static String readAll(InputStream is)throws IOException{if(is==null)return "";ByteArrayOutputStream out=new ByteArrayOutputStream();byte[]b=new byte[8192];int n;while((n=is.read(b))>0)out.write(b,0,n);return out.toString("UTF-8");}
     private static void sleep(long ms)throws InterruptedException{Thread.sleep(ms);}
     private String cookieValue(String name){String cookie=CookieManager.getInstance().getCookie(BASE);if(cookie==null)return "";for(String part:cookie.split(";")){String[]kv=part.trim().split("=",2);if(kv.length==2&&kv[0].equals(name))return kv[1];}return "";}
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    //  SKILL STRATEGY — INNER MODELS
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    static class PlayerSkill {
-        int skillId, mpCost, stamCost;
-        String name;
-
-        static PlayerSkill fromPipe(String s) {
-            String[] p = s.split("\\|");
-            PlayerSkill sk = new PlayerSkill();
-            sk.skillId  = Integer.parseInt(p[0]);
-            sk.name     = p[1];
-            sk.mpCost   = Integer.parseInt(p[2]);
-            sk.stamCost = Integer.parseInt(p[3]);
-            return sk;
-        }
-        String toPipe() { return skillId + "|" + name + "|" + mpCost + "|" + stamCost; }
-    }
-
-    static class QuickSet {
-        int setNumber;
-        String name, applyType;
-
-        QuickSet() {}
-        QuickSet(int n, String nm, String t) { setNumber = n; name = nm; applyType = t; }
-
-        static QuickSet fromPipe(String s) {
-            String[] p = s.split("\\|");
-            return new QuickSet(Integer.parseInt(p[0]), p[1], p[2]);
-        }
-        String toPipe() { return setNumber + "|" + name + "|" + applyType; }
-    }
-
-    static class BossStrategy {
-        String        bossKey        = "";
-        int           gearSetNumber  = -1;
-        int           petSetNumber   = -1;
-        List<Integer> buffSkillIds   = new ArrayList<>();
-
-        // Main attack — one of two modes
-        boolean useStaminaSlash  = true;   // true = stamina slash mode, false = class skill mode
-
-        // Stamina slash mode fields
-        int slashSkillId  = 0;   // 0=Slash, -1=Power, -2=Heroic, -3=Ultimate, -4=Legendary, -5=Worldbreaker
-        int slashStamCost = 1;   // 1, 10, 50, 100, 200, 1000
-
-        // Class skill mode field
-        int mainClassSkillId = -1;  // player class skill id; -1 = none
-
-        // Shared
-        int           repeatCount      = 0;
-        int           periodicSkillId  = -1;
-        int           periodicEveryN   = 0;
-
-        boolean isConfigured() {
-            return repeatCount > 0 &&
-                   (useStaminaSlash ? slashSkillId != Integer.MIN_VALUE
-                                    : mainClassSkillId > 0);
-        }
-
-        String toJson() {
-            StringBuilder sb = new StringBuilder("{");
-            sb.append("\"bossKey\":\"").append(bossKey).append("\",");
-            sb.append("\"gearSetNumber\":").append(gearSetNumber).append(",");
-            sb.append("\"petSetNumber\":").append(petSetNumber).append(",");
-            sb.append("\"useStaminaSlash\":").append(useStaminaSlash).append(",");
-            sb.append("\"slashSkillId\":").append(slashSkillId).append(",");
-            sb.append("\"slashStamCost\":").append(slashStamCost).append(",");
-            sb.append("\"mainClassSkillId\":").append(mainClassSkillId).append(",");
-            sb.append("\"repeatCount\":").append(repeatCount).append(",");
-            sb.append("\"periodicSkillId\":").append(periodicSkillId).append(",");
-            sb.append("\"periodicEveryN\":").append(periodicEveryN).append(",");
-            sb.append("\"buffSkillIds\":[");
-            for (int i = 0; i < buffSkillIds.size(); i++) {
-                sb.append(buffSkillIds.get(i));
-                if (i < buffSkillIds.size() - 1) sb.append(",");
-            }
-            sb.append("]}");
-            return sb.toString();
-        }
-
-        static BossStrategy fromJson(String json) {
-            BossStrategy s = new BossStrategy();
-            s.bossKey          = jsonStr(json, "bossKey");
-            s.gearSetNumber    = jsonInt(json, "gearSetNumber", -1);
-            s.petSetNumber     = jsonInt(json, "petSetNumber", -1);
-            // Boolean: look for "useStaminaSlash":false; default true
-            s.useStaminaSlash  = !json.contains("\"useStaminaSlash\":false");
-            s.slashSkillId     = jsonInt(json, "slashSkillId", 0);
-            s.slashStamCost    = jsonInt(json, "slashStamCost", 1);
-            s.mainClassSkillId = jsonInt(json, "mainClassSkillId", -1);
-            s.repeatCount      = jsonInt(json, "repeatCount", 0);
-            // Legacy migration: if old fields present and repeatCount not set, migrate
-            if (s.repeatCount == 0) {
-                int legacyRepeat = jsonInt(json, "mainRepeatCount", 0);
-                if (legacyRepeat > 0) {
-                    s.repeatCount = legacyRepeat;
-                    int legacySkillId = jsonInt(json, "mainSkillId", 0);
-                    if (legacySkillId > 0) {
-                        s.useStaminaSlash  = false;
-                        s.mainClassSkillId = legacySkillId;
-                    }
-                }
-            }
-            s.periodicSkillId  = jsonInt(json, "periodicSkillId", -1);
-            s.periodicEveryN   = jsonInt(json, "periodicEveryN", 0);
-            String arr = first(json, "\"buffSkillIds\":\\[([^\\]]*)\\]");
-            if (!empty(arr)) {
-                for (String id : arr.split(","))
-                    if (!id.trim().isEmpty())
-                        try { s.buffSkillIds.add(Integer.parseInt(id.trim())); } catch (Exception ignored) {}
-            }
-            return s;
-        }
-
-        static String jsonStr(String json, String key) {
-            String v = first(json, "\"" + key + "\":\"([^\"]+)\"");
-            return v == null ? "" : v;
-        }
-        static int jsonInt(String json, String key, int def) {
-            String v = first(json, "\"" + key + "\":(-?\\d+)");
-            try { return v == null || v.isEmpty() ? def : Integer.parseInt(v); }
-            catch (NumberFormatException e) { return def; }
-        }
-        // delegates to BotForegroundService static helpers
-        static String first(String s, String re) {
-            Matcher m = Pattern.compile(re).matcher(s == null ? "" : s);
-            return m.find() ? m.group(1) : "";
-        }
-        static boolean empty(String s) { return s == null || s.trim().isEmpty(); }
-    }
 }
