@@ -692,6 +692,24 @@ public class BotForegroundService extends Service {
                     }
                 }
 
+                // Strategy 4 (direct monsters): "will Auto die in HH:MM:SS"
+                // The server renders this phrase + time as visible HTML even when the
+                // nodmgCountdown element value is filled client-side by JavaScript.
+                // The regex spans across the tags between the phrase and the time value.
+                if (empty(b.timer)) {
+                    String rawTimer = first(html,
+                        "(?is)will\\s+auto\\s+die\\b.{0,200}?([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                    if (!empty(rawTimer)) {
+                        try {
+                            String[] tp = rawTimer.trim().split(":");
+                            long secs = tp.length == 3
+                                ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
+                                : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
+                            b.timer = "Auto dies in " + formatSecs(secs);
+                        } catch (NumberFormatException ignored) {}
+                    }
+                }
+
                 // ── DAMAGE ────────────────────────────────────────────────────
                 // <span id="yourDamageValue">6,100,819,740</span>
                 String dmgStr = first(html, "(?is)id=[\"']yourDamageValue[\"'][^>]*>([0-9,]+)");
@@ -906,6 +924,18 @@ public class BotForegroundService extends Service {
         return null;
     }
 
+    // ── Direct-monster-safe enabled check ─────────────────────────────────────
+    // The attack while loop checks "boss_enabled_" + b.key, but direct monsters
+    // store their enabled state under "monster_enabled_<prefKey>" (without the
+    // "monsters:" prefix). This helper resolves the correct key for each type.
+    private boolean isBossEnabledForAttack(Boss b) {
+        if (b.isDirectMonster) {
+            String prefKey = b.key.startsWith("monsters:") ? b.key.substring(9) : b.key;
+            return sp.getBoolean("monster_enabled_" + prefKey, false);
+        }
+        return sp.getBoolean("boss_enabled_" + b.key, false);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     //  ATTACK SEQUENCE  ← Artemis Mark + PvP mid-session check integrated
     // ═══════════════════════════════════════════════════════════════════════════
@@ -989,7 +1019,7 @@ public class BotForegroundService extends Service {
 
             int hitCount = 0;
             while (running && sp.getBoolean("global_enabled",false) && totalDamage < damageCap
-                           && sp.getBoolean("boss_enabled_" + b.key, false)) {
+                           && isBossEnabledForAttack(b)) {
 
                 // ── PvP phase mid-session guard ────────────────────────────────
                 // Boss can transition to PvP phase during an active attack session.
