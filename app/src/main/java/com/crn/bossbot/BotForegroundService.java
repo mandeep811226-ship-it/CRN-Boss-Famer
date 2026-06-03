@@ -536,12 +536,13 @@ public class BotForegroundService extends Service {
             b.categoryKey     = "monsters";
             b.categoryLabel   = "Monsters";
             b.monsterId       = monsterId;
+            // Use prefKey as the stable key — never changes even when real name is parsed
             b.key             = "monsters:" + prefKey;
             b.name            = savedName;
             b.alive           = false;
             b.status          = "CHECKING";
             b.enabled         = enabled;
-            b.cap             = parseCap(capRaw);
+            b.cap             = parseCap(sp.getString("monster_cap_" + prefKey, capRaw));
             b.damage          = 0;
 
             try {
@@ -561,51 +562,41 @@ public class BotForegroundService extends Service {
                 if (!parsedName.isEmpty() && parsedName.length() > 2) b.name = parsedName;
 
                 // ── ALIVE / DEAD ──────────────────────────────────────────────
-                // Primary signal: attack buttons present = alive
-                // <button class="attack-btn" data-skill-id="0" ...>Slash</button>
-                // Dead page removes these buttons and shows a defeat message.
+                // Most reliable signal: nodmgCountdown timer present = monster alive.
+                // Dead pages remove both the countdown and the attack buttons.
+                String countdown = first(html,
+                    "(?is)id=[\"']nodmgCountdown[\"'][^>]*>\\s*([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                boolean hasTimer     = !empty(countdown);
                 boolean hasAttackBtn = html.contains("class=\"attack-btn\"")
                                     || html.contains("data-skill-id=");
                 String lowerHtml = html.toLowerCase(Locale.US);
-                boolean defeatedMsg = lowerHtml.contains("has been defeated")
-                                   || lowerHtml.contains("monster is dead")
-                                   || lowerHtml.contains("already defeated")
-                                   || lowerHtml.contains("monster died");
+                boolean defeatedMsg  = lowerHtml.contains("has been defeated")
+                                    || lowerHtml.contains("monster is dead")
+                                    || lowerHtml.contains("already defeated")
+                                    || lowerHtml.contains("monster died");
 
-                // Secondary: hp-fill width — "width:0%" or "width: 0%" means dead
+                // hp-fill width:0% = dead
                 String hpFillStyle = first(html,
                     "(?is)id=[\"']hpFill[\"'][^>]*style=[\"']([^\"']+)[\"']");
                 if (empty(hpFillStyle))
                     hpFillStyle = first(html,
                         "(?is)class=[\"'][^\"']*hp-fill[^\"']*[\"'][^>]*style=[\"']([^\"']+)[\"']");
                 boolean hpZero = !empty(hpFillStyle)
-                    && hpFillStyle.replaceAll("\\s", "").contains("width:0%");
+                    && hpFillStyle.replaceAll("\\s","").contains("width:0%");
 
-                // Tertiary: id="hpText" — "❤️ 0 / 2,400,000,000,000 HP"
+                // hpText shows "0 / MAX HP"
                 String hpText = first(html, "(?is)id=[\"']hpText[\"'][^>]*>([^<]+)");
                 if (!empty(hpText)) {
                     String cur = first(hpText, "([0-9][0-9,]*)\\s*/");
                     if (!empty(cur) && parseLong(cur) == 0) hpZero = true;
                 }
 
-                boolean isDead = defeatedMsg || hpZero;
-                if (isDead || !hasAttackBtn) {
-                    b.alive  = false;
-                    b.status = "DEAD";
-                } else {
-                    b.alive  = true;
-                    b.status = "ALIVE";
-                }
-
-                // ── DAMAGE ────────────────────────────────────────────────────
-                // <span id="yourDamageValue">6,100,819,740</span>
-                String dmgStr = first(html, "(?is)id=[\"']yourDamageValue[\"'][^>]*>([0-9,]+)");
-                if (!empty(dmgStr)) b.damage = parseLong(dmgStr);
+                boolean isDead = defeatedMsg || hpZero || (!hasTimer && !hasAttackBtn);
+                b.alive  = !isDead;
+                b.status = isDead ? "DEAD" : "ALIVE";
 
                 // ── AUTO-DIE TIMER ────────────────────────────────────────────
                 // <strong id="nodmgCountdown">22:11:40</strong>
-                String countdown = first(html,
-                    "(?is)id=[\"']nodmgCountdown[\"'][^>]*>\\s*([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
                 if (!empty(countdown)) {
                     try {
                         String[] tp = countdown.trim().split(":");
@@ -614,6 +605,20 @@ public class BotForegroundService extends Service {
                             : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
                         b.timer = secs > 0 ? "Auto dies in " + formatSecs(secs) : "Auto dies soon";
                     } catch (NumberFormatException ignored) {}
+                }
+
+                // ── DAMAGE ────────────────────────────────────────────────────
+                // <span id="yourDamageValue">6,100,819,740</span>
+                String dmgStr = first(html, "(?is)id=[\"']yourDamageValue[\"'][^>]*>([0-9,]+)");
+                if (!empty(dmgStr)) b.damage = parseLong(dmgStr);
+
+                // ── AUTO-UPDATE SAVED NAME ────────────────────────────────────
+                // If the real name differs from what was saved (e.g. "Monster 499062177"),
+                // update PREF_DIRECT_MONSTERS so the UI shows the correct name.
+                if (!b.name.equals(savedName)) {
+                    updateDirectMonsterName(prefKey, b.name);
+                    append("INFO", "Direct monster name updated: \"" + savedName
+                        + "\" → \"" + b.name + "\"");
                 }
 
                 // Restore damage from session memory if higher than page value
@@ -632,6 +637,24 @@ public class BotForegroundService extends Service {
             list.add(b);
         }
         return list;
+    }
+
+    private void updateDirectMonsterName(String prefKey, String newName) {
+        String raw = sp.getString(PREF_DIRECT_MONSTERS, "");
+        if (empty(raw)) return;
+        StringBuilder sb = new StringBuilder();
+        for (String line : raw.split("\n")) {
+            String[] parts = line.split("\\|", -1);
+            if (parts.length >= 1 && parts[0].trim().equals(prefKey) && parts.length > 1) {
+                parts[1] = newName;
+                if (sb.length() > 0) sb.append("\n");
+                sb.append(String.join("|", parts));
+            } else {
+                if (sb.length() > 0) sb.append("\n");
+                sb.append(line);
+            }
+        }
+        sp.edit().putString(PREF_DIRECT_MONSTERS, sb.toString()).apply();
     }
 
     // ═══════════════════════════════════════════════════════════════════════════
