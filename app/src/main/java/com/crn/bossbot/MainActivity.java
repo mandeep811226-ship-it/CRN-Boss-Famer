@@ -933,6 +933,7 @@ public class MainActivity extends Activity {
         String status    = live != null && live.length > 2 ? live[2] : "CHECKING";
         String damage    = live != null && live.length > 3 ? live[3] : "0";
         String liveName  = live != null && live.length > 1 && !live[1].isEmpty() ? live[1] : savedName;
+        String timer     = live != null && live.length > 8 ? live[8] : "";
         boolean alive    = "ALIVE".equalsIgnoreCase(status);
         long dmgLong     = parseLong(damage);
         String storedCap = sp.getString(capKey, capRaw);
@@ -1017,6 +1018,18 @@ public class MainActivity extends Activity {
             presets.addView(pb);
         }
         c.addView(presets);
+
+        // Timer row
+        boolean hasAutoTimer = timer != null && !timer.isEmpty();
+        if (alive || hasAutoTimer) {
+            LinearLayout timerRow = row(Gravity.CENTER_VERTICAL);
+            timerRow.setPadding(0, dp(6), 0, dp(2));
+            String timerDisplay = alive && hasAutoTimer ? "⏳ " + timer : alive ? "⏳ Alive" : timer;
+            TextView timerTv = txt(timerDisplay, 10, false, hasAutoTimer ? C_AMBER : C_MUTED);
+            timerTv.setSingleLine(true);
+            timerRow.addView(timerTv, lp0(1));
+            c.addView(timerRow);
+        }
 
         // Bottom: ID chip + delete
         LinearLayout bottomRow=row(Gravity.CENTER_VERTICAL); bottomRow.setPadding(0,dp(8),0,dp(2));
