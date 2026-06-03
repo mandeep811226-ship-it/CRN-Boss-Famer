@@ -418,8 +418,7 @@ public class BotForegroundService extends Service {
 
         // Fetch battle page for alive bosses to get accurate auto-die timer.
         // Direct monsters already had their timer fetched in fetchDirectMonsters() —
-        // re-fetching here would overwrite a valid timer with a failed parse and log
-        // a false "timer not found" warning.
+        // re-fetching here would overwrite a valid timer with a failed parse.
         for (Boss b : all) {
             if (!b.alive) continue;
             if (b.isDirectMonster) continue; // timer already set in fetchDirectMonsters()
@@ -617,10 +616,14 @@ public class BotForegroundService extends Service {
 
                 // Page must have actual battle content — guards against login/session-
                 // expired redirect pages which also have no timer and no attack buttons.
+                // Require specific battle-page indicators only — generic words like
+                // "battle" or "monster" also appear on login-redirect/error pages and
+                // cause false-DEAD when the session briefly fails to attach.
                 boolean pageHasBattleContent = lowerHtml.contains("hpfill")
                     || lowerHtml.contains("attack-btn")
                     || lowerHtml.contains("nodmgcountdown")
-                    || lowerHtml.contains("battle") || lowerHtml.contains("monster");
+                    || lowerHtml.contains("yourdamagevalue")
+                    || lowerHtml.contains("card-title");
 
                 boolean isDead = defeatedMsg || hpZero
                     || (!hasTimer && !hasAttackBtn && pageHasBattleContent);
