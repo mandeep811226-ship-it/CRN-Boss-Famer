@@ -561,100 +561,90 @@ public class BotForegroundService extends Service {
                 parsedName = parsedName.replaceAll("^[\\s\\p{So}\\p{Sm}\\p{Sk}\\p{Sc}\\p{Cn}]+", "").trim();
                 if (!parsedName.isEmpty() && parsedName.length() > 2) b.name = parsedName;
 
-                // ── SESSION / LOGIN-PAGE GUARD ────────────────────────────────
-                // If the cookie expired the server silently returns a login or
-                // redirect page (HTTP 200). That page has none of the battle
-                // elements, so every signal below reads false → isDead = true
-                // even though the monster is actually alive.
-                // We detect this situation and bail out early rather than
-                // mis-marking the monster as DEAD.
-                String lowerHtml = html.toLowerCase(Locale.US);
-                boolean looksLikeLoginPage =
-                    (lowerHtml.contains("login") || lowerHtml.contains("sign in")
-                        || lowerHtml.contains("please log") || lowerHtml.contains("session expired"))
-                    && !lowerHtml.contains("battle") && !lowerHtml.contains("monster");
-                if (looksLikeLoginPage) {
-                    append("DIAG", "Direct monster [" + monsterId
-                        + "]: received login/redirect page — session may be expired."
-                        + " Skipping status update to avoid false DEAD. Please re-login.");
-                    b.status = "SESSION_ERR";
-                    list.add(b); // keep in list but skip further processing
-                    continue;
-                }
-
                 // ── ALIVE / DEAD ──────────────────────────────────────────────
-                // Signal 1: nodmgCountdown timer present = monster alive.
+                // Most reliable signal: nodmgCountdown timer present = monster alive.
+                // Dead pages remove both the countdown and the attack buttons.
                 String countdown = first(html,
                     "(?is)id=[\"']nodmgCountdown[\"'][^>]*>\\s*([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-                boolean hasTimer = !empty(countdown);
-
-                // Signal 2: attack buttons (check both quote styles + attribute form)
+                boolean hasTimer     = !empty(countdown);
+                // Check both quote styles in case server changes quoting
                 boolean hasAttackBtn = html.contains("class=\"attack-btn\"")
                                     || html.contains("class='attack-btn'")
                                     || html.contains("data-skill-id=");
+                String lowerHtml = html.toLowerCase(Locale.US);
 
-                // Signal 3: explicit defeat message in page text
-                boolean defeatedMsg = lowerHtml.contains("has been defeated")
-                                   || lowerHtml.contains("monster is dead")
-                                   || lowerHtml.contains("already defeated")
-                                   || lowerHtml.contains("monster died");
+                // ── defeatedMsg — MUST be scoped to visible text only ─────────
+                // The live battle.php page embeds defeat phrases inside <script>
+                // JavaScript strings (e.g. message templates, error handlers).
+                // A plain html.contains() hits those JS strings even when the
+                // monster is 100% alive.  We strip all <script> blocks first so
+                // only visible page text is searched.
+                String htmlNoScript = html.replaceAll("(?is)<script[^>]*>.*?</script>", " ");
+                String lowerNoScript = htmlNoScript.toLowerCase(Locale.US);
+                boolean defeatedMsg = lowerNoScript.contains("has been defeated")
+                                   || lowerNoScript.contains("monster is dead")
+                                   || lowerNoScript.contains("already defeated")
+                                   || lowerNoScript.contains("monster died");
 
-                // Signal 4: HP bar at 0%
+                // Extra guard: if ANY alive signal is present (timer OR attack buttons),
+                // the monster is alive — a defeat phrase in visible text at that point
+                // is a UI quirk (e.g. battle log showing a previous kill), not a real
+                // death signal.  Only trust defeatedMsg when there are zero alive signals.
+                boolean anyAliveSignal = hasTimer || hasAttackBtn;
+                if (anyAliveSignal) defeatedMsg = false;
+
+                // hp-fill width:0% = dead
                 String hpFillStyle = first(html,
                     "(?is)id=[\"']hpFill[\"'][^>]*style=[\"']([^\"']+)[\"']");
                 if (empty(hpFillStyle))
                     hpFillStyle = first(html,
                         "(?is)class=[\"'][^\"']*hp-fill[^\"']*[\"'][^>]*style=[\"']([^\"']+)[\"']");
                 boolean hpZero = !empty(hpFillStyle)
-                    && hpFillStyle.replaceAll("\\s", "").contains("width:0%");
+                    && hpFillStyle.replaceAll("\\s","").contains("width:0%");
 
-                // Signal 5: hpText shows "0 / MAX HP"
+                // hpText shows "0 / MAX HP"
                 String hpText = first(html, "(?is)id=[\"']hpText[\"'][^>]*>([^<]+)");
                 if (!empty(hpText)) {
                     String cur = first(hpText, "([0-9][0-9,]*)\\s*/");
                     if (!empty(cur) && parseLong(cur) == 0) hpZero = true;
                 }
 
-                // Signal 6: battle page has meaningful content at all
-                // (guards against truncated / empty responses)
-                boolean pageHasBattleContent = lowerHtml.contains("battle")
-                    || lowerHtml.contains("monster") || lowerHtml.contains("hpfill")
-                    || hasTimer || hasAttackBtn;
+                // Page must have actual battle content — guards against login-redirect
+                // pages (session expired) which also have no timer and no attack buttons.
+                boolean pageHasBattleContent = lowerHtml.contains("hpfill")
+                    || lowerHtml.contains("attack-btn") || lowerHtml.contains("nodmgcountdown")
+                    || lowerHtml.contains("battle") || lowerHtml.contains("monster");
 
-                // ── DEAD DECISION ─────────────────────────────────────────────
-                // Only mark DEAD when at least one POSITIVE death signal fires.
-                // Missing battle content alone (no timer + no attack btn) is only
-                // treated as DEAD when the page actually HAS some battle structure
-                // (so we don't mis-fire on login/empty pages that slipped through).
-                boolean missingBothAliveSignals = !hasTimer && !hasAttackBtn;
                 boolean isDead = defeatedMsg || hpZero
-                    || (missingBothAliveSignals && pageHasBattleContent);
-
+                    || (!hasTimer && !hasAttackBtn && pageHasBattleContent);
                 b.alive  = !isDead;
                 b.status = isDead ? "DEAD" : "ALIVE";
 
                 // ── DIAGNOSTIC LOG ────────────────────────────────────────────
-                // Always log which signals fired so future false-DEAD events
-                // can be diagnosed from the log without needing to reproduce.
-                String diagSignals = "hasTimer=" + hasTimer
-                    + " hasAttackBtn=" + hasAttackBtn
-                    + " defeatedMsg=" + defeatedMsg
-                    + " hpZero=" + hpZero
-                    + " hpFill=" + (empty(hpFillStyle) ? "n/a" : hpFillStyle.replaceAll("\\s",""))
-                    + " pageOk=" + pageHasBattleContent;
-                if (isDead) {
-                    // Identify the specific trigger(s) for the DEAD decision
-                    List<String> triggers = new ArrayList<>();
-                    if (defeatedMsg)              triggers.add("defeatedMsg");
-                    if (hpZero)                   triggers.add("hpZero");
-                    if (missingBothAliveSignals && pageHasBattleContent)
-                                                  triggers.add("noTimerAndNoBtn");
-                    append("DIAG", "Direct monster [" + b.name + "] id=" + monsterId
-                        + " → DEAD triggered by: " + joinStrings(triggers, "+")
-                        + " | " + diagSignals);
-                } else {
-                    append("DIAG", "Direct monster [" + b.name + "] id=" + monsterId
-                        + " → ALIVE | " + diagSignals);
+                // Logs every signal so false-DEAD events can be diagnosed later.
+                {
+                    String hpFillCompact = empty(hpFillStyle) ? "n/a"
+                        : hpFillStyle.replaceAll("\\s", "");
+                    String diagLine = "hasTimer=" + hasTimer
+                        + " hasAttackBtn=" + hasAttackBtn
+                        + " defeatedMsg=" + defeatedMsg
+                        + " hpZero=" + hpZero
+                        + " hpFill=" + hpFillCompact
+                        + " pageOk=" + pageHasBattleContent;
+                    if (isDead) {
+                        List<String> triggers = new ArrayList<>();
+                        if (defeatedMsg) triggers.add("defeatedMsg");
+                        if (hpZero)      triggers.add("hpZero");
+                        if (!hasTimer && !hasAttackBtn && pageHasBattleContent)
+                                         triggers.add("noTimerAndNoBtn");
+                        append("DIAG", "Direct monster [" + b.name + "] id=" + monsterId
+                            + " → DEAD triggered by: "
+                            + (triggers.isEmpty() ? "none?" : android.text.TextUtils.join("+", triggers))
+                            + " | " + diagLine);
+                    } else {
+                        append("DIAG", "Direct monster [" + b.name + "] id=" + monsterId
+                            + " → ALIVE | " + diagLine);
+                    }
                 }
 
                 // ── AUTO-DIE TIMER ────────────────────────────────────────────
@@ -684,21 +674,12 @@ public class BotForegroundService extends Service {
                 }
 
                 // Restore damage from session memory only when monster is ALIVE.
-                // Do NOT restore stale damage onto a dead monster — that was
-                // causing logs to show e.g. "status=DEAD dmg=6,100,819,740"
-                // which made it look like the monster had just been killed
-                // even when the DEAD verdict itself was wrong (false positive).
+                // If monster is dead, clear stale memory so it doesn't pollute
+                // the next spawn's readings (old high damage on new monster = wrong).
                 if (b.alive) {
                     Long mem = aliveDamageByBoss.get(b.key);
-                    if (mem != null && mem > b.damage) {
-                        append("DIAG", "Direct monster [" + b.name
-                            + "] damage restored from session memory: "
-                            + fmtn(b.damage) + " → " + fmtn(mem));
-                        b.damage = mem;
-                    }
+                    if (mem != null && mem > b.damage) b.damage = mem;
                 } else {
-                    // Monster is dead — clear stale session damage so it doesn't
-                    // pollute the next spawn's readings.
                     aliveDamageByBoss.remove(b.key);
                 }
 
