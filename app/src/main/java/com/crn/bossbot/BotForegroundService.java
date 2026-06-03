@@ -562,27 +562,40 @@ public class BotForegroundService extends Service {
                 if (!parsedName.isEmpty() && parsedName.length() > 2) b.name = parsedName;
 
                 // ── ALIVE / DEAD ──────────────────────────────────────────────
-                // Most reliable signal: nodmgCountdown timer present = monster alive.
-                // Dead pages remove both the countdown and the attack buttons.
+                String lowerHtml = html.toLowerCase(Locale.US);
+
+                // Signal 1: nodmgCountdown timer value (static HTML)
                 String countdown = first(html,
                     "(?is)id=[\"']nodmgCountdown[\"'][^>]*>\\s*([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-                // hasTimer is true if we got a time value OR if the nodmgCountdown
-                // element exists at all (timer value may be JS-injected at runtime;
-                // the raw HTTP response can have an empty element — but the element
-                // itself only exists on alive pages).
+                // Also treat the mere presence of nodmgCountdown element as alive —
+                // the timer value may be JS-injected so the raw HTTP response can
+                // have an empty element: <strong id="nodmgCountdown"></strong>
                 boolean hasTimer = !empty(countdown)
                     || html.contains("id=\"nodmgCountdown\"")
                     || html.contains("id='nodmgCountdown'");
+
+                // Signal 2: attack buttons (both quote styles)
                 boolean hasAttackBtn = html.contains("class=\"attack-btn\"")
                                     || html.contains("class='attack-btn'")
                                     || html.contains("data-skill-id=");
-                String lowerHtml = html.toLowerCase(Locale.US);
-                boolean defeatedMsg  = lowerHtml.contains("has been defeated")
-                                    || lowerHtml.contains("monster is dead")
-                                    || lowerHtml.contains("already defeated")
-                                    || lowerHtml.contains("monster died");
 
-                // hp-fill width:0% = dead
+                // Signal 3: defeat message — strip <script> blocks first!
+                // The live page embeds defeat phrases inside JavaScript string
+                // literals (message templates, error handlers). A plain
+                // html.contains() hits those JS strings even on a 100% alive page.
+                // Stripping scripts before searching prevents this false positive.
+                String htmlNoScript = html.replaceAll("(?is)<script[^>]*>.*?</script>", " ");
+                String lowerNoScript = htmlNoScript.toLowerCase(Locale.US);
+                boolean defeatedMsg = lowerNoScript.contains("has been defeated")
+                                   || lowerNoScript.contains("monster is dead")
+                                   || lowerNoScript.contains("already defeated")
+                                   || lowerNoScript.contains("monster died");
+                // Extra guard: if ANY alive signal is present, ignore defeatedMsg.
+                // A defeat phrase in visible text alongside attack buttons is a UI
+                // quirk (battle history log), not a real death signal.
+                if (hasTimer || hasAttackBtn) defeatedMsg = false;
+
+                // Signal 4: HP bar at 0%
                 String hpFillStyle = first(html,
                     "(?is)id=[\"']hpFill[\"'][^>]*style=[\"']([^\"']+)[\"']");
                 if (empty(hpFillStyle))
@@ -591,19 +604,55 @@ public class BotForegroundService extends Service {
                 boolean hpZero = !empty(hpFillStyle)
                     && hpFillStyle.replaceAll("\\s","").contains("width:0%");
 
-                // hpText shows "0 / MAX HP"
+                // Signal 5: hpText shows "0 / MAX HP"
                 String hpText = first(html, "(?is)id=[\"']hpText[\"'][^>]*>([^<]+)");
                 if (!empty(hpText)) {
                     String cur = first(hpText, "([0-9][0-9,]*)\\s*/");
                     if (!empty(cur) && parseLong(cur) == 0) hpZero = true;
                 }
 
-                boolean isDead = defeatedMsg || hpZero || (!hasTimer && !hasAttackBtn);
+                // Page must have actual battle content — guards against login/session-
+                // expired redirect pages which also have no timer and no attack buttons.
+                boolean pageHasBattleContent = lowerHtml.contains("hpfill")
+                    || lowerHtml.contains("attack-btn")
+                    || lowerHtml.contains("nodmgcountdown")
+                    || lowerHtml.contains("battle") || lowerHtml.contains("monster");
+
+                boolean isDead = defeatedMsg || hpZero
+                    || (!hasTimer && !hasAttackBtn && pageHasBattleContent);
                 b.alive  = !isDead;
                 b.status = isDead ? "DEAD" : "ALIVE";
 
+                // ── DIAGNOSTIC LOG ────────────────────────────────────────────
+                // Every scan logs which signals fired so future false-DEAD events
+                // can be diagnosed directly from the log.
+                {
+                    String hpFillShort = empty(hpFillStyle) ? "n/a"
+                        : hpFillStyle.replaceAll("\\s", "");
+                    String diag = "hasTimer=" + hasTimer
+                        + " hasAttackBtn=" + hasAttackBtn
+                        + " defeatedMsg=" + defeatedMsg
+                        + " hpZero=" + hpZero
+                        + " hpFill=" + hpFillShort
+                        + " pageOk=" + pageHasBattleContent;
+                    if (isDead) {
+                        List<String> triggers = new ArrayList<>();
+                        if (defeatedMsg) triggers.add("defeatedMsg");
+                        if (hpZero)      triggers.add("hpZero");
+                        if (!hasTimer && !hasAttackBtn && pageHasBattleContent)
+                                         triggers.add("noTimerAndNoBtn");
+                        append("DIAG", "Direct monster [" + b.name + "] id=" + monsterId
+                            + " \u2192 DEAD triggered by: "
+                            + (triggers.isEmpty() ? "none?" : android.text.TextUtils.join("+", triggers))
+                            + " | " + diag);
+                    } else {
+                        append("DIAG", "Direct monster [" + b.name + "] id=" + monsterId
+                            + " \u2192 ALIVE | " + diag);
+                    }
+                }
+
                 // ── AUTO-DIE TIMER ────────────────────────────────────────────
-                // Strategy 1: static HTML value — <strong id="nodmgCountdown">22:11:40</strong>
+                // Strategy 1: static value in nodmgCountdown element
                 if (!empty(countdown)) {
                     try {
                         String[] tp = countdown.trim().split(":");
@@ -613,8 +662,7 @@ public class BotForegroundService extends Service {
                         b.timer = secs > 0 ? "Auto dies in " + formatSecs(secs) : "Auto dies soon";
                     } catch (NumberFormatException ignored) {}
                 }
-                // Strategy 2: JS config — window.AUTO_DIE_CFG = { nextDieMs: 1234567890 }
-                // (timer value may be JS-injected; the raw HTTP response has the config object)
+                // Strategy 2: JS config object — window.AUTO_DIE_CFG = { nextDieMs: ... }
                 if (empty(b.timer)) {
                     String nextDieMsStr = first(html,
                         "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
@@ -650,17 +698,22 @@ public class BotForegroundService extends Service {
                 if (!empty(dmgStr)) b.damage = parseLong(dmgStr);
 
                 // ── AUTO-UPDATE SAVED NAME ────────────────────────────────────
-                // If the real name differs from what was saved (e.g. "Monster 499062177"),
-                // update PREF_DIRECT_MONSTERS so the UI shows the correct name.
                 if (!b.name.equals(savedName)) {
                     updateDirectMonsterName(prefKey, b.name);
                     append("INFO", "Direct monster name updated: \"" + savedName
-                        + "\" → \"" + b.name + "\"");
+                        + "\" \u2192 \"" + b.name + "\"");
                 }
 
-                // Restore damage from session memory if higher than page value
-                Long mem = aliveDamageByBoss.get(b.key);
-                if (mem != null && mem > b.damage) b.damage = mem;
+                // ── RESTORE DAMAGE FROM SESSION MEMORY ───────────────────────
+                // Only restore when alive — never paste stale damage from a
+                // previous life onto a dead monster (causes misleading log entries).
+                // When dead, clear the memory so it doesn't bleed into next spawn.
+                if (b.alive) {
+                    Long mem = aliveDamageByBoss.get(b.key);
+                    if (mem != null && mem > b.damage) b.damage = mem;
+                } else {
+                    aliveDamageByBoss.remove(b.key);
+                }
 
                 append("INFO", "Direct monster [" + b.name + "] id=" + monsterId
                     + " status=" + b.status + " dmg=" + fmtn(b.damage)
@@ -865,9 +918,8 @@ public class BotForegroundService extends Service {
             if (empty(userId)) { append("ERROR","No demon cookie. Please reconnect/login first."); return; }
 
             // For direct monsters b.cap is set from "monster_cap_<prefKey>" in fetchDirectMonsters().
-            // capForBoss() looks up "cap_monsters_<root>" — a DIFFERENT key — so it always
-            // returns 0 for direct monsters, causing "no damage cap set" even when cap IS set.
-            // Use b.cap directly for direct monsters; capForBoss() for wave-parsed bosses.
+            // capForBoss() looks up "cap_monsters_<root>" — a different key — so it returns 0
+            // for direct monsters, causing "no damage cap set" even when a cap IS configured.
             long damageCap = (b.isDirectMonster && b.cap > 0)
                 ? b.cap
                 : capForBoss(b.name, b.categoryKey);
