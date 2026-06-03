@@ -750,41 +750,42 @@ public class MainActivity extends Activity {
                 WindowManager.LayoutParams.WRAP_CONTENT);
     }
 
-    /** Edit the keyword fragment for an existing phase entry. */
     private void showEditFragmentDialog(String rootKey, int idx, String current) {
-        EditText input = phaseEditText(current);
-        new AlertDialog.Builder(this)
-            .setTitle("Edit Phase Keyword")
-            .setMessage("Substring of the boss name during this phase\n(e.g. 'lunar duelist')")
-            .setView(input)
-            .setPositiveButton("Save", (d, w) -> {
-                sp.edit()
-                  .putString("phase_namefrag_" + rootKey + "_" + idx,
-                      input.getText().toString().trim().toLowerCase(Locale.US))
-                  .putString("phase_source_"   + rootKey + "_" + idx, "manual")
-                  .apply();
-                toast("Keyword updated"); showMain();
-            })
-            .setNegativeButton("Cancel", null).show();
+        LinearLayout root = darkDialog();
+        root.addView(txt("Edit Phase Keyword", 16, true, Color.WHITE));
+        TextView sub = txt("Substring of the boss name during this phase\n(e.g. 'lunar duelist')", 10, false, C_MUTED);
+        sub.setSingleLine(false); sub.setPadding(0, dp(4), 0, dp(12)); root.addView(sub);
+        EditText input = phaseEditText(current); root.addView(input);
+        AlertDialog dialog = darkDialogCreate(root);
+        root.addView(darkDialogButtons(dialog, "Cancel", null, "Save", () -> {
+            sp.edit()
+              .putString("phase_namefrag_" + rootKey + "_" + idx,
+                  input.getText().toString().trim().toLowerCase(Locale.US))
+              .putString("phase_source_" + rootKey + "_" + idx, "manual")
+              .apply();
+            toast("Keyword updated"); showMain();
+        }));
+        dialog.show(); darkDialogSize(dialog);
     }
 
-    /** Edit the damage cap for a specific phase entry. */
     private void showEditPhaseCapDialog(String rootKey, int idx,
                                          String bossName, String current) {
         String label = sp.getString("phase_label_" + rootKey + "_" + idx, "Phase "+(idx+1));
+        LinearLayout root = darkDialog();
+        root.addView(txt("Cap for " + label, 16, true, Color.WHITE));
+        TextView sub = txt(bossName.split(",")[0].trim(), 11, false, C_MUTED);
+        sub.setPadding(0, dp(3), 0, dp(12)); root.addView(sub);
         EditText input = phaseEditText(current.equals("0") ? "" : current);
         input.setInputType(InputType.TYPE_CLASS_TEXT);
-        new AlertDialog.Builder(this)
-            .setTitle("Cap for " + label)
-            .setMessage(bossName.split(",")[0].trim())
-            .setView(input)
-            .setPositiveButton("Save", (d, w) -> {
-                String val = input.getText().toString().trim();
-                if (val.isEmpty()) val = "0";
-                sp.edit().putString("phase_cap_" + rootKey + "_" + idx, val).apply();
-                toast("Phase cap updated"); showMain();
-            })
-            .setNegativeButton("Cancel", null).show();
+        input.setHint("e.g. 5b, 1000000000"); root.addView(input);
+        AlertDialog dialog = darkDialogCreate(root);
+        root.addView(darkDialogButtons(dialog, "Cancel", null, "Save", () -> {
+            String val = input.getText().toString().trim();
+            if (val.isEmpty()) val = "0";
+            sp.edit().putString("phase_cap_" + rootKey + "_" + idx, val).apply();
+            toast("Phase cap updated"); showMain();
+        }));
+        dialog.show(); darkDialogSize(dialog);
     }
 
     /**
@@ -794,31 +795,29 @@ public class MainActivity extends Activity {
     private void confirmDeletePhase(String rootKey, String catKey,
                                      String bossName, int idx, int totalCount) {
         String label = sp.getString("phase_label_" + rootKey + "_" + idx, "Phase "+(idx+1));
-        new AlertDialog.Builder(this)
-            .setTitle("Delete " + label + "?")
-            .setMessage("Remove phase entry for: " + bossName.split(",")[0].trim()
-                + "\n\nAuto-detected phases will be re-learned on the next scan.")
-            .setPositiveButton("Delete", (d, w) -> {
-                SharedPreferences.Editor ed = sp.edit();
-                // Shift entries after idx down
-                for (int i = idx; i < totalCount - 1; i++) {
-                    String next = rootKey + "_" + (i + 1);
-                    String cur  = rootKey + "_" + i;
-                    ed.putString("phase_label_"    + cur, sp.getString("phase_label_"    + next, "Phase "+(i+2)))
-                      .putString("phase_namefrag_" + cur, sp.getString("phase_namefrag_" + next, ""))
-                      .putString("phase_type_"     + cur, sp.getString("phase_type_"     + next, "pve"))
-                      .putString("phase_cap_"      + cur, sp.getString("phase_cap_"      + next, "0"))
-                      .putString("phase_source_"   + cur, sp.getString("phase_source_"   + next, "manual"));
-                }
-                String last = rootKey + "_" + (totalCount - 1);
-                ed.remove("phase_label_"    + last).remove("phase_namefrag_" + last)
-                  .remove("phase_type_"     + last).remove("phase_cap_"      + last)
-                  .remove("phase_source_"   + last)
-                  .putInt("phase_count_" + rootKey, Math.max(0, totalCount - 1))
-                  .apply();
-                toast("Phase deleted"); showMain();
-            })
-            .setNegativeButton("Cancel", null).show();
+        LinearLayout root = darkDialog();
+        root.addView(txt("Delete " + label + "?", 16, true, Color.WHITE));
+        TextView sub = txt("Remove phase entry for: " + bossName.split(",")[0].trim()
+            + "\n\nAuto-detected phases will be re-learned on the next scan.", 11, false, C_MUTED);
+        sub.setSingleLine(false); sub.setPadding(0, dp(6), 0, dp(4)); root.addView(sub);
+        AlertDialog dialog = darkDialogCreate(root);
+        root.addView(darkDialogButtons(dialog, "Cancel", null, "Delete", () -> {
+            SharedPreferences.Editor ed = sp.edit();
+            for (int i = idx; i < totalCount - 1; i++) {
+                String next = rootKey + "_" + (i+1); String cur = rootKey + "_" + i;
+                ed.putString("phase_label_"    + cur, sp.getString("phase_label_"    + next, "Phase "+(i+2)))
+                  .putString("phase_namefrag_" + cur, sp.getString("phase_namefrag_" + next, ""))
+                  .putString("phase_type_"     + cur, sp.getString("phase_type_"     + next, "pve"))
+                  .putString("phase_cap_"      + cur, sp.getString("phase_cap_"      + next, "0"))
+                  .putString("phase_source_"   + cur, sp.getString("phase_source_"   + next, "manual"));
+            }
+            String last = rootKey + "_" + (totalCount-1);
+            ed.remove("phase_label_"+last).remove("phase_namefrag_"+last)
+              .remove("phase_type_"+last).remove("phase_cap_"+last).remove("phase_source_"+last)
+              .putInt("phase_count_"+rootKey, Math.max(0, totalCount-1)).apply();
+            toast("Phase deleted"); showMain();
+        }));
+        dialog.show(); darkDialogSize(dialog);
     }
 
     // ── Phase helpers ──────────────────────────────────────────────────────────
@@ -986,11 +985,23 @@ public class MainActivity extends Activity {
             noCap?C_AMBER:C_BLUE,
             noCap?Color.argb(120,255,176,32):Color.argb(100,59,158,255));
         capChip.setTextSize(11); capChip.setPadding(dp(14),dp(5),dp(14),dp(5));
-        capChip.setOnClickListener(v->{
-            EditText input=phaseEditText(noCap?"":storedCap); input.setInputType(InputType.TYPE_CLASS_TEXT);
-            new AlertDialog.Builder(this).setTitle("Cap for").setMessage(liveName).setView(input)
-                .setPositiveButton("Save",(d,w)->{String val=input.getText().toString().trim();if(val.isEmpty())val="0";sp.edit().putString(capKey,val).apply();updateMonsterCapInStorage(prefKey,val);toast("Cap updated");showMain();})
-                .setNegativeButton("Cancel",null).show();
+        capChip.setOnClickListener(v -> {
+            LinearLayout dlgRoot = darkDialog();
+            dlgRoot.addView(txt("Damage Cap", 15, true, Color.WHITE));
+            TextView dlgSub = txt(liveName, 10, false, C_MUTED);
+            dlgSub.setPadding(0, dp(3), 0, dp(10)); dlgRoot.addView(dlgSub);
+            EditText dlgInput = phaseEditText(noCap ? "" : storedCap);
+            dlgInput.setInputType(InputType.TYPE_CLASS_TEXT);
+            dlgInput.setHint("e.g. 5b, 1000000000"); dlgRoot.addView(dlgInput);
+            AlertDialog dlg = darkDialogCreate(dlgRoot);
+            dlgRoot.addView(darkDialogButtons(dlg, "Cancel", null, "Save", () -> {
+                String val = dlgInput.getText().toString().trim();
+                if (val.isEmpty()) val = "0";
+                sp.edit().putString(capKey, val).apply();
+                updateMonsterCapInStorage(prefKey, val);
+                toast("Cap updated"); showMain();
+            }));
+            dlg.show(); darkDialogSize(dlg);
         });
         capRow.addView(capChip,lpWH(-2,-2)); c.addView(capRow);
 
@@ -1089,7 +1100,21 @@ public class MainActivity extends Activity {
         if(dialog.getWindow()!=null) dialog.getWindow().setLayout((int)(getResources().getDisplayMetrics().widthPixels*0.92f),WindowManager.LayoutParams.WRAP_CONTENT);
     }
 
-    private void confirmDeleteMonster(String prefKey,String name){new AlertDialog.Builder(this).setTitle("Remove Monster?").setMessage("Remove \""+name+"\" from direct hunt list?").setPositiveButton("Remove",(d,w)->{List<String[]> monsters=loadDirectMonsters();monsters.removeIf(m->m[0].equals(prefKey));saveDirectMonsters(monsters);sp.edit().remove("monster_enabled_"+prefKey).remove("monster_cap_"+prefKey).apply();toast("Monster removed");showMain();}).setNegativeButton("Cancel",null).show();}
+    private void confirmDeleteMonster(String prefKey, String name) {
+        LinearLayout root = darkDialog();
+        root.addView(txt("Remove Monster?", 16, true, Color.WHITE));
+        TextView sub = txt("Remove \"" + name + "\" from direct hunt list?\nThis won't affect in-game progress.", 11, false, C_MUTED);
+        sub.setSingleLine(false); sub.setPadding(0, dp(6), 0, dp(4)); root.addView(sub);
+        AlertDialog dialog = darkDialogCreate(root);
+        root.addView(darkDialogButtons(dialog, "Cancel", null, "Remove", () -> {
+            List<String[]> monsters = loadDirectMonsters();
+            monsters.removeIf(m -> m[0].equals(prefKey));
+            saveDirectMonsters(monsters);
+            sp.edit().remove("monster_enabled_"+prefKey).remove("monster_cap_"+prefKey).apply();
+            toast("Monster removed"); showMain();
+        }));
+        dialog.show(); darkDialogSize(dialog);
+    }
     private String extractMonsterIdFromUrl(String url){if(url==null||url.isEmpty())return "";Matcher m=Pattern.compile("[?&]id=([0-9]+)").matcher(url);return m.find()?m.group(1):"";}
     private List<String[]> loadDirectMonsters(){List<String[]> list=new ArrayList<>();String raw=sp.getString(PREF_DIRECT_MONSTERS,"");if(raw==null||raw.trim().isEmpty())return list;for(String line:raw.split("\n")){String[]parts=line.split("\\|",-1);if(parts.length>=3&&!parts[2].trim().isEmpty())list.add(parts);}return list;}
     private void saveDirectMonsters(List<String[]> monsters){StringBuilder sb=new StringBuilder();for(String[]m:monsters){if(sb.length()>0)sb.append("\n");sb.append(String.join("|",(CharSequence[])m));}sp.edit().putString(PREF_DIRECT_MONSTERS,sb.toString()).apply();}
@@ -1132,7 +1157,23 @@ public class MainActivity extends Activity {
     private void toggleBot(){if(sp.getBoolean("global_enabled",false)){sp.edit().putBoolean("global_enabled",false).apply();startService(new Intent(this,BotForegroundService.class).setAction(BotForegroundService.ACTION_STOP));toast("Bot stopped");}else{requestIgnoreBatteryOptimizationsOnce();if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},99);sp.edit().putBoolean("global_enabled",true).apply();Intent in=new Intent(this,BotForegroundService.class).setAction(BotForegroundService.ACTION_START);if(Build.VERSION.SDK_INT>=26)startForegroundService(in);else startService(in);toast("Bot started");}showMain();}
     private void logout(){sp.edit().putBoolean("connected",false).putBoolean("global_enabled",false).apply();startService(new Intent(this,BotForegroundService.class).setAction(BotForegroundService.ACTION_STOP));try{CookieManager.getInstance().removeAllCookies(null);CookieManager.getInstance().flush();}catch(Exception ignored){}toast("Logged out");showMain();}
 
-    private void editBossCap(String catKey,String name,String current){String key="cap_"+catKey+"_"+bossRootKey(name);final EditText input=new EditText(this);input.setSingleLine(true);input.setInputType(InputType.TYPE_CLASS_TEXT);input.setText(sp.getString(key,current));input.setSelectAllOnFocus(true);new AlertDialog.Builder(this).setTitle("Damage cap for").setMessage(name).setView(input).setPositiveButton("Save",(d,w)->{String v=input.getText().toString().trim();if(v.isEmpty())v="0";sp.edit().putString(key,v).apply();toast("Cap updated");showMain();}).setNegativeButton("Cancel",null).show();}
+    private void editBossCap(String catKey, String name, String current) {
+        String key = "cap_" + catKey + "_" + bossRootKey(name);
+        LinearLayout root = darkDialog();
+        root.addView(txt("Damage Cap", 16, true, Color.WHITE));
+        TextView sub = txt(name, 11, false, C_MUTED); sub.setPadding(0, dp(3), 0, dp(10)); root.addView(sub);
+        EditText input = phaseEditText(sp.getString(key, current));
+        input.setInputType(InputType.TYPE_CLASS_TEXT);
+        input.setHint("e.g. 5b, 1000000000"); root.addView(input);
+        AlertDialog dialog = darkDialogCreate(root);
+        root.addView(darkDialogButtons(dialog, "Cancel", null, "Save", () -> {
+            String v = input.getText().toString().trim();
+            if (v.isEmpty()) v = "0";
+            sp.edit().putString(key, v).apply();
+            toast("Cap updated"); showMain();
+        }));
+        dialog.show(); darkDialogSize(dialog);
+    }
 
     private void showLogin(){currentScreen="login";destroyLogin();root.removeAllViews();LinearLayout box=new LinearLayout(this);box.setOrientation(LinearLayout.VERTICAL);box.setBackgroundColor(C_BG);root.addView(box,new FrameLayout.LayoutParams(-1,-1));LinearLayout top=new LinearLayout(this);top.setOrientation(LinearLayout.HORIZONTAL);top.setPadding(dp(8),statusBarHeight()+dp(4),dp(8),dp(6));top.setBackgroundColor(C_SURFACE);top.setGravity(Gravity.CENTER_VERTICAL);box.addView(top,lpWH(-1,-2));top.addView(navBtn("← Back",C_SURFACE,C_MUTED,C_BORDER2,v->showMain()),lpWH(0,dp(42)));((LinearLayout.LayoutParams)top.getChildAt(0).getLayoutParams()).weight=1;top.addView(navBtn("Reload",C_SURFACE,C_BLUE,C_BORDER2,v->{if(loginWeb!=null)loginWeb.reload();}),lpWH(0,dp(42)));((LinearLayout.LayoutParams)top.getChildAt(1).getLayoutParams()).weight=1;top.addView(navBtn(isConnected()?"✓ Connected":"Save & Connect",C_SURFACE,isConnected()?C_OK:C_ACCENT,C_BORDER2,v->{CookieManager.getInstance().flush();sp.edit().putBoolean("connected",isConnected()).apply();toast(isConnected()?"Connected cookies saved":"No login cookie detected yet");showLogin();}),lpWH(0,dp(42)));((LinearLayout.LayoutParams)top.getChildAt(2).getLayoutParams()).weight=1;loginWeb=new WebView(this);WebSettings s=loginWeb.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setDatabaseEnabled(true);s.setLoadsImagesAutomatically(true);s.setUseWideViewPort(true);s.setLoadWithOverviewMode(true);if(Build.VERSION.SDK_INT>=21){s.setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);CookieManager.getInstance().setAcceptThirdPartyCookies(loginWeb,true);}CookieManager.getInstance().setAcceptCookie(true);loginWeb.setWebViewClient(new WebViewClient(){@Override public void onPageFinished(WebView v,String u){CookieManager.getInstance().flush();}});box.addView(loginWeb,new LinearLayout.LayoutParams(-1,0,1));loginWeb.loadUrl("https://demonicscans.org/");}
 
@@ -1188,7 +1229,84 @@ public class MainActivity extends Activity {
     private GradientDrawable inputBg(){return roundRect(C_CARD,dp(8),C_BORDER2);}
 
     // ═══════════════════════════════════════════════════════════════════════════
-    //  HELPERS — views & misc (unchanged)
+    //  DARK DIALOG HELPERS — consistent dark-themed dialogs across the app
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /** Creates a dark-themed dialog root layout. */
+    private LinearLayout darkDialog() {
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setBackground(roundRect(C_SURFACE, dp(16), C_BORDER2));
+        root.setPadding(dp(20), dp(20), dp(20), dp(16));
+        return root;
+    }
+
+    /** Creates and configures a transparent-background AlertDialog from a view. */
+    private AlertDialog darkDialogCreate(View content) {
+        AlertDialog d = new AlertDialog.Builder(this).setView(content).create();
+        if (d.getWindow() != null)
+            d.getWindow().setBackgroundDrawable(
+                new android.graphics.drawable.ColorDrawable(Color.TRANSPARENT));
+        return d;
+    }
+
+    /** Sets dialog width to 92% of screen. */
+    private void darkDialogSize(AlertDialog d) {
+        if (d.getWindow() != null)
+            d.getWindow().setLayout(
+                (int)(getResources().getDisplayMetrics().widthPixels * 0.92f),
+                WindowManager.LayoutParams.WRAP_CONTENT);
+    }
+
+    /**
+     * Builds a Cancel + action button row for dark dialogs.
+     * cancelLabel/cancelAction: null = just dismiss.
+     * actionLabel/actionRunnable: the positive action.
+     * Action button is red for destructive actions (Delete/Remove), teal otherwise.
+     */
+    private LinearLayout darkDialogButtons(AlertDialog dialog,
+                                            String cancelLabel, Runnable cancelAction,
+                                            String actionLabel, Runnable actionRunnable) {
+        LinearLayout btnRow = row(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams brLp = lpW(-1); brLp.setMargins(0, dp(18), 0, 0);
+        btnRow.setLayoutParams(brLp);
+
+        TextView cancelBtn = txt(cancelLabel != null ? cancelLabel : "Cancel", 12, true, C_TEXT2);
+        cancelBtn.setGravity(Gravity.CENTER);
+        cancelBtn.setPadding(dp(16), dp(11), dp(16), dp(11));
+        cancelBtn.setBackground(roundRect(Color.TRANSPARENT, dp(9), C_BORDER2));
+        cancelBtn.setOnClickListener(v -> {
+            dialog.dismiss();
+            if (cancelAction != null) cancelAction.run();
+        });
+
+        boolean isDestructive = actionLabel != null &&
+            (actionLabel.toLowerCase(Locale.US).contains("delete")
+            || actionLabel.toLowerCase(Locale.US).contains("remove"));
+        int actionColor = isDestructive ? C_DANGER : C_ACCENT;
+        int actionTextColor = isDestructive ? Color.WHITE : Color.parseColor("#03090f");
+
+        TextView actionBtn = txt(actionLabel != null ? actionLabel : "OK", 12, true, actionTextColor);
+        actionBtn.setGravity(Gravity.CENTER);
+        actionBtn.setPadding(dp(16), dp(11), dp(16), dp(11));
+        GradientDrawable actionBg = new GradientDrawable();
+        actionBg.setColor(actionColor); actionBg.setCornerRadius(dp(9));
+        actionBtn.setBackground(actionBg);
+        actionBtn.setOnClickListener(v -> {
+            dialog.dismiss();
+            if (actionRunnable != null) actionRunnable.run();
+        });
+
+        LinearLayout.LayoutParams abLp = lpWH(0, -2);
+        abLp.weight = 1.4f; abLp.setMargins(dp(10), 0, 0, 0);
+
+        btnRow.addView(cancelBtn, lp0(1));
+        btnRow.addView(actionBtn, abLp);
+        return btnRow;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    //  HELPERS — views & misc
     // ═══════════════════════════════════════════════════════════════════════════
     private View buildProgressBar(float pct,int width,int height){pct=Math.max(0f,Math.min(1f,pct));LinearLayout bar=new LinearLayout(this);bar.setOrientation(LinearLayout.HORIZONTAL);LinearLayout.LayoutParams wlp=new LinearLayout.LayoutParams(width<0?-1:width,height);wlp.setMargins(0,dp(4),0,0);bar.setLayoutParams(wlp);GradientDrawable trackBg=new GradientDrawable();trackBg.setColor(Color.argb(40,255,255,255));trackBg.setCornerRadius(dp(2));if(pct>0f){GradientDrawable fd=new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,pct>=1f?new int[]{C_OK,Color.parseColor("#00ffaa")}:new int[]{C_BLUE,C_ACCENT});fd.setCornerRadius(dp(2));View fill=new View(this);fill.setBackground(fd);bar.addView(fill,new LinearLayout.LayoutParams(0,height,pct));}if(pct<1f){View track=new View(this);track.setBackground(trackBg);bar.addView(track,new LinearLayout.LayoutParams(0,height,1f-pct));}return bar;}
     private View emptyCard(String msg){LinearLayout c=new LinearLayout(this);c.setOrientation(LinearLayout.VERTICAL);c.setPadding(dp(14),dp(18),dp(14),dp(18));c.setBackground(roundRect(Color.parseColor("#0d1e36"),dp(12),C_BORDER2));LinearLayout.LayoutParams lp=lpW(-1);lp.setMargins(0,dp(8),0,0);c.setLayoutParams(lp);TextView t=txt(msg,13,false,C_TEXT2);t.setGravity(Gravity.CENTER);c.addView(t);return c;}
