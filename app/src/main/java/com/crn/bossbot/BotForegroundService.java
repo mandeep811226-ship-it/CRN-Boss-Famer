@@ -426,33 +426,46 @@ public class BotForegroundService extends Service {
             try {
                 String battleHtml = get(BATTLE_URL + "?id=" + enc(b.monsterId), BATTLE_URL);
 
-                // Strategy 1: window.AUTO_DIE_CFG = { nextDieMs: ... }
-                String nextDieMsStr = first(battleHtml,
-                    "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
-                if (!empty(nextDieMsStr)) {
+                // Strategy 1: id="nodmgCountdown" — <strong id="nodmgCountdown">22:11:40</strong>
+                String countdown = first(battleHtml,
+                    "(?is)id=[\"']nodmgCountdown[\"'][^>]*>\\s*([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                if (!empty(countdown)) {
                     try {
-                        long epochMs  = Long.parseLong(nextDieMsStr.trim());
-                        long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
-                        if (secsLeft > 0 && secsLeft < 86400L * 7)
-                            b.timer = "Auto dies in " + formatSecs(secsLeft);
-                        else if (secsLeft <= 0)
-                            b.timer = "Auto dies soon";
+                        String[] tp = countdown.trim().split(":");
+                        long secs = tp.length == 3
+                            ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
+                            : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
+                        if (secs > 0) b.timer = "Auto dies in " + formatSecs(secs);
+                        else b.timer = "Auto dies soon";
                     } catch (NumberFormatException ignored) {}
                 }
 
-                // Strategy 2: autoDieTimer div
+                // Strategy 2: window.AUTO_DIE_CFG = { nextDieMs: ... }
+                if (empty(b.timer)) {
+                    String nextDieMsStr = first(battleHtml,
+                        "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
+                    if (!empty(nextDieMsStr)) {
+                        try {
+                            long epochMs  = Long.parseLong(nextDieMsStr.trim());
+                            long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
+                            if (secsLeft > 0 && secsLeft < 86400L * 7)
+                                b.timer = "Auto dies in " + formatSecs(secsLeft);
+                            else if (secsLeft <= 0)
+                                b.timer = "Auto dies soon";
+                        } catch (NumberFormatException ignored) {}
+                    }
+                }
+
+                // Strategy 3: id="autoDieTimer"
                 if (empty(b.timer)) {
                     String timerBlock = first(battleHtml,
                         "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.*?)</(?:div|span|p|td)");
-                    if (empty(timerBlock))
-                        timerBlock = first(battleHtml,
-                            "(?is)id=[\"']autoDieTimer[\"'][^>]*>(.{0,100})");
-                    String raw = empty(timerBlock) ? ""
+                    String rawTimer = empty(timerBlock) ? ""
                         : first(timerBlock.replaceAll("<[^>]+>", " "),
                             "([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-                    if (!empty(raw)) {
-                        String[] tp = raw.trim().split(":");
+                    if (!empty(rawTimer)) {
                         try {
+                            String[] tp = rawTimer.trim().split(":");
                             long secs = tp.length == 3
                                 ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
                                 : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
@@ -461,13 +474,13 @@ public class BotForegroundService extends Service {
                     }
                 }
 
-                // Strategy 3: visible text "AUTO DIES AFTER: 00:50:13"
+                // Strategy 4: visible text "AUTO DIES AFTER: 00:50:13"
                 if (empty(b.timer)) {
-                    String raw = first(battleHtml,
+                    String rawTimer = first(battleHtml,
                         "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-                    if (!empty(raw)) {
-                        String[] tp = raw.trim().split(":");
+                    if (!empty(rawTimer)) {
                         try {
+                            String[] tp = rawTimer.trim().split(":");
                             long secs = tp.length == 3
                                 ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
                                 : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
@@ -535,53 +548,71 @@ public class BotForegroundService extends Service {
                 String battleUrl = BATTLE_URL + "?id=" + enc(monsterId);
                 String html = get(battleUrl, battleUrl);
 
-                // ── Parse name from battle page ──────────────────────────────
-                // "Grathmor, First Wallbreaker" is in an <h> tag after MONSTER badge
+                // ── NAME ─────────────────────────────────────────────────────
+                // Real HTML: <div class="card-title">🧟 Grathmor, First Wallbreaker</div>
+                // Strip leading emoji/whitespace after extracting.
                 String parsedName = firstNonEmpty(
-                    first(html, "(?is)<h[1-6][^>]*>\\s*(?:<[^>]+>\\s*)?([A-Z][^<]{3,80}?)\\s*(?:</[^>]+>\\s*)?</h[1-6]>"),
-                    first(html, "(?i)class=[\"'][^\"']*monster[^\"']*name[^\"']*[\"'][^>]*>([^<]+)"),
+                    first(html, "(?is)class=[\"']card-title[\"'][^>]*>([^<]+)"),
+                    first(html, "(?is)<div[^>]+class=[\"'][^\"']*card-title[^\"']*[\"'][^>]*>([^<]+)"),
                     savedName
                 );
-                parsedName = parsedName.replaceAll("(?i)^(monster|boss)\\s*", "").trim();
-                if (!parsedName.isEmpty() && parsedName.length() > 3) b.name = parsedName;
+                // Remove leading emoji characters and whitespace
+                parsedName = parsedName.replaceAll("^[\\s\\p{So}\\p{Sm}\\p{Sk}\\p{Sc}\\p{Cn}]+", "").trim();
+                if (!parsedName.isEmpty() && parsedName.length() > 2) b.name = parsedName;
 
-                // ── Alive/dead detection ─────────────────────────────────────
-                // Dead: HP is 0/MAX or page contains death indicators
+                // ── ALIVE / DEAD ──────────────────────────────────────────────
+                // Primary signal: attack buttons present = alive
+                // <button class="attack-btn" data-skill-id="0" ...>Slash</button>
+                // Dead page removes these buttons and shows a defeat message.
+                boolean hasAttackBtn = html.contains("class=\"attack-btn\"")
+                                    || html.contains("data-skill-id=");
                 String lowerHtml = html.toLowerCase(Locale.US);
-                boolean isDead = lowerHtml.contains("monster has been defeated")
-                              || lowerHtml.contains("monster is dead")
-                              || lowerHtml.contains("already defeated");
+                boolean defeatedMsg = lowerHtml.contains("has been defeated")
+                                   || lowerHtml.contains("monster is dead")
+                                   || lowerHtml.contains("already defeated")
+                                   || lowerHtml.contains("monster died");
 
-                // HP: "HP 2,400,000,000,000 / 2,400,000,000,000"
-                String hpCurrent = first(html, "(?i)HP[^0-9]{0,10}([0-9][0-9,]+)\\s*/");
-                String hpMax     = first(html, "(?i)HP[^0-9]{0,10}[0-9][0-9,]+\\s*/\\s*([0-9][0-9,]+)");
-                if (!empty(hpCurrent) && !empty(hpMax)) {
-                    long cur = parseLong(hpCurrent);
-                    long max = parseLong(hpMax);
-                    if (cur <= 0 && max > 0) isDead = true;
-                    if (cur > 0) isDead = false;
+                // Secondary: hp-fill width — "width:0%" or "width: 0%" means dead
+                String hpFillStyle = first(html,
+                    "(?is)id=[\"']hpFill[\"'][^>]*style=[\"']([^\"']+)[\"']");
+                if (empty(hpFillStyle))
+                    hpFillStyle = first(html,
+                        "(?is)class=[\"'][^\"']*hp-fill[^\"']*[\"'][^>]*style=[\"']([^\"']+)[\"']");
+                boolean hpZero = !empty(hpFillStyle)
+                    && hpFillStyle.replaceAll("\\s", "").contains("width:0%");
+
+                // Tertiary: id="hpText" — "❤️ 0 / 2,400,000,000,000 HP"
+                String hpText = first(html, "(?is)id=[\"']hpText[\"'][^>]*>([^<]+)");
+                if (!empty(hpText)) {
+                    String cur = first(hpText, "([0-9][0-9,]*)\\s*/");
+                    if (!empty(cur) && parseLong(cur) == 0) hpZero = true;
                 }
 
-                // Also check if the Slash/attack buttons are present = alive
-                boolean hasAttackButtons = lowerHtml.contains("stamina)")
-                                        || lowerHtml.contains("slash");
-                if (!isDead && hasAttackButtons) b.alive = true;
-                if (isDead) { b.alive = false; b.status = "DEAD"; }
-                else        { b.alive = true;  b.status = "ALIVE"; }
+                boolean isDead = defeatedMsg || hpZero;
+                if (isDead || !hasAttackBtn) {
+                    b.alive  = false;
+                    b.status = "DEAD";
+                } else {
+                    b.alive  = true;
+                    b.status = "ALIVE";
+                }
 
-                // ── DMG: "DMG: 6,100,819,740" chip on the battle page ────────
-                String dmgStr = first(html, "(?i)DMG[:\\s]+([0-9][0-9,]+)");
+                // ── DAMAGE ────────────────────────────────────────────────────
+                // <span id="yourDamageValue">6,100,819,740</span>
+                String dmgStr = first(html, "(?is)id=[\"']yourDamageValue[\"'][^>]*>([0-9,]+)");
                 if (!empty(dmgStr)) b.damage = parseLong(dmgStr);
 
-                // ── Auto-die timer ────────────────────────────────────────────
-                String nextDieMsStr = first(html,
-                    "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
-                if (!empty(nextDieMsStr)) {
+                // ── AUTO-DIE TIMER ────────────────────────────────────────────
+                // <strong id="nodmgCountdown">22:11:40</strong>
+                String countdown = first(html,
+                    "(?is)id=[\"']nodmgCountdown[\"'][^>]*>\\s*([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                if (!empty(countdown)) {
                     try {
-                        long epochMs  = Long.parseLong(nextDieMsStr.trim());
-                        long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
-                        if (secsLeft > 0) b.timer = "Auto dies in " + formatSecs(secsLeft);
-                        else b.timer = "Auto dies soon";
+                        String[] tp = countdown.trim().split(":");
+                        long secs = tp.length == 3
+                            ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
+                            : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
+                        b.timer = secs > 0 ? "Auto dies in " + formatSecs(secs) : "Auto dies soon";
                     } catch (NumberFormatException ignored) {}
                 }
 
@@ -590,7 +621,8 @@ public class BotForegroundService extends Service {
                 if (mem != null && mem > b.damage) b.damage = mem;
 
                 append("INFO", "Direct monster [" + b.name + "] id=" + monsterId
-                    + " status=" + b.status + " dmg=" + fmtn(b.damage));
+                    + " status=" + b.status + " dmg=" + fmtn(b.damage)
+                    + (empty(b.timer) ? "" : " | " + b.timer));
 
             } catch (Exception e) {
                 append("ERROR", "Direct monster fetch [" + monsterId + "]: " + e.getMessage());
