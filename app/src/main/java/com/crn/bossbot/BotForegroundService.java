@@ -656,19 +656,20 @@ public class BotForegroundService extends Service {
                 }
 
                 // ── AUTO-DIE TIMER ────────────────────────────────────────────
-                // Strategy 1: data-epoch / data-nodmg-ts attributes (static, most reliable)
+                // Strategy 1: "will Auto die in HH:MM:SS" visible phrase (most reliable —
+                // server-rendered text, spans across tags, not JS-dependent).
+                // Widened to 500 chars to cover any intervening HTML between phrase and time.
                 if (empty(b.timer)) {
-                    String epochStr = first(html,
-                        "(?is)data-(?:epoch|nodmg-ts|die-ms|die-at|end-time|killtime|nodmg)=[\"']([0-9]{9,13})[\"']");
-                    if (!empty(epochStr)) {
+                    String rawTimer = first(html,
+                        "(?is)will\\s+auto\\s+die\\b.{0,500}?([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                    if (!empty(rawTimer)) {
                         try {
-                            long epochRaw = Long.parseLong(epochStr.trim());
-                            long epochMs  = epochRaw > 9_999_999_999L ? epochRaw : epochRaw * 1000L;
-                            long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
-                            if (secsLeft > 0 && secsLeft < 86400L * 7)
-                                b.timer = "Auto dies in " + formatSecs(secsLeft);
-                            else if (secsLeft <= 0)
-                                b.timer = "Auto dies soon";
+                            String[] tp = rawTimer.trim().split(":");
+                            long secs = tp.length == 3
+                                ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
+                                : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
+                            if (secs > 0) b.timer = "Auto dies in " + formatSecs(secs);
+                            else b.timer = "Auto dies soon";
                         } catch (NumberFormatException ignored) {}
                     }
                 }
@@ -701,20 +702,6 @@ public class BotForegroundService extends Service {
                 if (empty(b.timer)) {
                     String rawTimer = first(html,
                         "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-                    if (!empty(rawTimer)) {
-                        try {
-                            String[] tp = rawTimer.trim().split(":");
-                            long secs = tp.length == 3
-                                ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
-                                : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
-                            b.timer = "Auto dies in " + formatSecs(secs);
-                        } catch (NumberFormatException ignored) {}
-                    }
-                }
-                // Strategy 5: "will Auto die" phrase spanning HTML tags (widened to 500 chars)
-                if (empty(b.timer)) {
-                    String rawTimer = first(html,
-                        "(?is)will\\s+auto\\s+die\\b.{0,500}?([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
                     if (!empty(rawTimer)) {
                         try {
                             String[] tp = rawTimer.trim().split(":");
