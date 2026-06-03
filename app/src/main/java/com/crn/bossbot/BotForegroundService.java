@@ -416,9 +416,13 @@ public class BotForegroundService extends Service {
         all.addAll(fetchDirectMonsters());
         // ────────────────────────────────────────────────────────────────────────
 
-        // Fetch battle page for alive bosses to get accurate auto-die timer
+        // Fetch battle page for alive bosses to get accurate auto-die timer.
+        // Direct monsters already had their timer fetched in fetchDirectMonsters() —
+        // re-fetching here would overwrite a valid timer with a failed parse and log
+        // a false "timer not found" warning.
         for (Boss b : all) {
             if (!b.alive) continue;
+            if (b.isDirectMonster) continue; // timer already set in fetchDirectMonsters()
             if (empty(b.monsterId)) {
                 append("WARN", b.name + " alive but monsterId empty — skipping timer fetch");
                 continue;
