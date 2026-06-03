@@ -656,18 +656,14 @@ public class BotForegroundService extends Service {
                 }
 
                 // ── AUTO-DIE TIMER ────────────────────────────────────────────
-                // Strategy 1: data-epoch / data-nodmg-ts / data-die-ms attributes
-                // These are static server-rendered HTML attributes — most reliable.
-                // The page uses Unix epoch seconds (not ms) for data-epoch.
-                // Selector evidence: data-epoch="1780461037" data-tzoff="19800"
+                // Strategy 1: data-epoch / data-nodmg-ts attributes (static, most reliable)
                 if (empty(b.timer)) {
                     String epochStr = first(html,
                         "(?is)data-(?:epoch|nodmg-ts|die-ms|die-at|end-time|killtime|nodmg)=[\"']([0-9]{9,13})[\"']");
                     if (!empty(epochStr)) {
                         try {
-                            long raw = Long.parseLong(epochStr.trim());
-                            // Distinguish epoch-seconds (10 digits ~2001-2286) from epoch-ms (13 digits)
-                            long epochMs = raw > 9_999_999_999L ? raw : raw * 1000L;
+                            long epochRaw = Long.parseLong(epochStr.trim());
+                            long epochMs  = epochRaw > 9_999_999_999L ? epochRaw : epochRaw * 1000L;
                             long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
                             if (secsLeft > 0 && secsLeft < 86400L * 7)
                                 b.timer = "Auto dies in " + formatSecs(secsLeft);
@@ -715,8 +711,7 @@ public class BotForegroundService extends Service {
                         } catch (NumberFormatException ignored) {}
                     }
                 }
-                // Strategy 5: "will Auto die in" phrase — spans HTML tags, widened to 500 chars
-                // Structure: <strong>will Auto die</strong> " in " <strong id="nodmgCountdown">16:51:47</strong>
+                // Strategy 5: "will Auto die" phrase spanning HTML tags (widened to 500 chars)
                 if (empty(b.timer)) {
                     String rawTimer = first(html,
                         "(?is)will\\s+auto\\s+die\\b.{0,500}?([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
