@@ -616,9 +616,6 @@ public class BotForegroundService extends Service {
 
                 // Page must have actual battle content — guards against login/session-
                 // expired redirect pages which also have no timer and no attack buttons.
-                // Require specific battle-page indicators only — generic words like
-                // "battle" or "monster" also appear on login-redirect/error pages and
-                // cause false-DEAD when the session briefly fails to attach.
                 boolean pageHasBattleContent = lowerHtml.contains("hpfill")
                     || lowerHtml.contains("attack-btn")
                     || lowerHtml.contains("nodmgcountdown")
@@ -659,8 +656,28 @@ public class BotForegroundService extends Service {
                 }
 
                 // ── AUTO-DIE TIMER ────────────────────────────────────────────
-                // Strategy 1: static value in nodmgCountdown element
-                if (!empty(countdown)) {
+                // Strategy 1: data-epoch / data-nodmg-ts / data-die-ms attributes
+                // These are static server-rendered HTML attributes — most reliable.
+                // The page uses Unix epoch seconds (not ms) for data-epoch.
+                // Selector evidence: data-epoch="1780461037" data-tzoff="19800"
+                if (empty(b.timer)) {
+                    String epochStr = first(html,
+                        "(?is)data-(?:epoch|nodmg-ts|die-ms|die-at|end-time|killtime|nodmg)=[\"']([0-9]{9,13})[\"']");
+                    if (!empty(epochStr)) {
+                        try {
+                            long raw = Long.parseLong(epochStr.trim());
+                            // Distinguish epoch-seconds (10 digits ~2001-2286) from epoch-ms (13 digits)
+                            long epochMs = raw > 9_999_999_999L ? raw : raw * 1000L;
+                            long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
+                            if (secsLeft > 0 && secsLeft < 86400L * 7)
+                                b.timer = "Auto dies in " + formatSecs(secsLeft);
+                            else if (secsLeft <= 0)
+                                b.timer = "Auto dies soon";
+                        } catch (NumberFormatException ignored) {}
+                    }
+                }
+                // Strategy 2: static value in nodmgCountdown element text content
+                if (empty(b.timer) && !empty(countdown)) {
                     try {
                         String[] tp = countdown.trim().split(":");
                         long secs = tp.length == 3
@@ -669,7 +686,7 @@ public class BotForegroundService extends Service {
                         b.timer = secs > 0 ? "Auto dies in " + formatSecs(secs) : "Auto dies soon";
                     } catch (NumberFormatException ignored) {}
                 }
-                // Strategy 2: JS config object — window.AUTO_DIE_CFG = { nextDieMs: ... }
+                // Strategy 3: JS config object — window.AUTO_DIE_CFG = { nextDieMs: ... }
                 if (empty(b.timer)) {
                     String nextDieMsStr = first(html,
                         "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
@@ -684,7 +701,7 @@ public class BotForegroundService extends Service {
                         } catch (NumberFormatException ignored) {}
                     }
                 }
-                // Strategy 3: visible text "AUTO DIES AFTER: 00:50:13"
+                // Strategy 4: visible text "AUTO DIES AFTER: 00:50:13"
                 if (empty(b.timer)) {
                     String rawTimer = first(html,
                         "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
@@ -698,14 +715,11 @@ public class BotForegroundService extends Service {
                         } catch (NumberFormatException ignored) {}
                     }
                 }
-
-                // Strategy 4 (direct monsters): "will Auto die in HH:MM:SS"
-                // The server renders this phrase + time as visible HTML even when the
-                // nodmgCountdown element value is filled client-side by JavaScript.
-                // The regex spans across the tags between the phrase and the time value.
+                // Strategy 5: "will Auto die in" phrase — spans HTML tags, widened to 500 chars
+                // Structure: <strong>will Auto die</strong> " in " <strong id="nodmgCountdown">16:51:47</strong>
                 if (empty(b.timer)) {
                     String rawTimer = first(html,
-                        "(?is)will\\s+auto\\s+die\\b.{0,200}?([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                        "(?is)will\\s+auto\\s+die\\b.{0,500}?([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
                     if (!empty(rawTimer)) {
                         try {
                             String[] tp = rawTimer.trim().split(":");
