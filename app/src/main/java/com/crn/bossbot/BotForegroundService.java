@@ -566,32 +566,21 @@ public class BotForegroundService extends Service {
                 // Dead pages remove both the countdown and the attack buttons.
                 String countdown = first(html,
                     "(?is)id=[\"']nodmgCountdown[\"'][^>]*>\\s*([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
-                boolean hasTimer     = !empty(countdown);
-                // Check both quote styles in case server changes quoting
+                // hasTimer is true if we got a time value OR if the nodmgCountdown
+                // element exists at all (timer value may be JS-injected at runtime;
+                // the raw HTTP response can have an empty element — but the element
+                // itself only exists on alive pages).
+                boolean hasTimer = !empty(countdown)
+                    || html.contains("id=\"nodmgCountdown\"")
+                    || html.contains("id='nodmgCountdown'");
                 boolean hasAttackBtn = html.contains("class=\"attack-btn\"")
                                     || html.contains("class='attack-btn'")
                                     || html.contains("data-skill-id=");
                 String lowerHtml = html.toLowerCase(Locale.US);
-
-                // ── defeatedMsg — MUST be scoped to visible text only ─────────
-                // The live battle.php page embeds defeat phrases inside <script>
-                // JavaScript strings (e.g. message templates, error handlers).
-                // A plain html.contains() hits those JS strings even when the
-                // monster is 100% alive.  We strip all <script> blocks first so
-                // only visible page text is searched.
-                String htmlNoScript = html.replaceAll("(?is)<script[^>]*>.*?</script>", " ");
-                String lowerNoScript = htmlNoScript.toLowerCase(Locale.US);
-                boolean defeatedMsg = lowerNoScript.contains("has been defeated")
-                                   || lowerNoScript.contains("monster is dead")
-                                   || lowerNoScript.contains("already defeated")
-                                   || lowerNoScript.contains("monster died");
-
-                // Extra guard: if ANY alive signal is present (timer OR attack buttons),
-                // the monster is alive — a defeat phrase in visible text at that point
-                // is a UI quirk (e.g. battle log showing a previous kill), not a real
-                // death signal.  Only trust defeatedMsg when there are zero alive signals.
-                boolean anyAliveSignal = hasTimer || hasAttackBtn;
-                if (anyAliveSignal) defeatedMsg = false;
+                boolean defeatedMsg  = lowerHtml.contains("has been defeated")
+                                    || lowerHtml.contains("monster is dead")
+                                    || lowerHtml.contains("already defeated")
+                                    || lowerHtml.contains("monster died");
 
                 // hp-fill width:0% = dead
                 String hpFillStyle = first(html,
@@ -609,46 +598,12 @@ public class BotForegroundService extends Service {
                     if (!empty(cur) && parseLong(cur) == 0) hpZero = true;
                 }
 
-                // Page must have actual battle content — guards against login-redirect
-                // pages (session expired) which also have no timer and no attack buttons.
-                boolean pageHasBattleContent = lowerHtml.contains("hpfill")
-                    || lowerHtml.contains("attack-btn") || lowerHtml.contains("nodmgcountdown")
-                    || lowerHtml.contains("battle") || lowerHtml.contains("monster");
-
-                boolean isDead = defeatedMsg || hpZero
-                    || (!hasTimer && !hasAttackBtn && pageHasBattleContent);
+                boolean isDead = defeatedMsg || hpZero || (!hasTimer && !hasAttackBtn);
                 b.alive  = !isDead;
                 b.status = isDead ? "DEAD" : "ALIVE";
 
-                // ── DIAGNOSTIC LOG ────────────────────────────────────────────
-                // Logs every signal so false-DEAD events can be diagnosed later.
-                {
-                    String hpFillCompact = empty(hpFillStyle) ? "n/a"
-                        : hpFillStyle.replaceAll("\\s", "");
-                    String diagLine = "hasTimer=" + hasTimer
-                        + " hasAttackBtn=" + hasAttackBtn
-                        + " defeatedMsg=" + defeatedMsg
-                        + " hpZero=" + hpZero
-                        + " hpFill=" + hpFillCompact
-                        + " pageOk=" + pageHasBattleContent;
-                    if (isDead) {
-                        List<String> triggers = new ArrayList<>();
-                        if (defeatedMsg) triggers.add("defeatedMsg");
-                        if (hpZero)      triggers.add("hpZero");
-                        if (!hasTimer && !hasAttackBtn && pageHasBattleContent)
-                                         triggers.add("noTimerAndNoBtn");
-                        append("DIAG", "Direct monster [" + b.name + "] id=" + monsterId
-                            + " → DEAD triggered by: "
-                            + (triggers.isEmpty() ? "none?" : android.text.TextUtils.join("+", triggers))
-                            + " | " + diagLine);
-                    } else {
-                        append("DIAG", "Direct monster [" + b.name + "] id=" + monsterId
-                            + " → ALIVE | " + diagLine);
-                    }
-                }
-
                 // ── AUTO-DIE TIMER ────────────────────────────────────────────
-                // <strong id="nodmgCountdown">22:11:40</strong>
+                // Strategy 1: static HTML value — <strong id="nodmgCountdown">22:11:40</strong>
                 if (!empty(countdown)) {
                     try {
                         String[] tp = countdown.trim().split(":");
@@ -657,6 +612,36 @@ public class BotForegroundService extends Service {
                             : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
                         b.timer = secs > 0 ? "Auto dies in " + formatSecs(secs) : "Auto dies soon";
                     } catch (NumberFormatException ignored) {}
+                }
+                // Strategy 2: JS config — window.AUTO_DIE_CFG = { nextDieMs: 1234567890 }
+                // (timer value may be JS-injected; the raw HTTP response has the config object)
+                if (empty(b.timer)) {
+                    String nextDieMsStr = first(html,
+                        "(?i)AUTO_DIE_CFG\\s*=\\s*\\{[^}]*nextDieMs\\s*:\\s*([0-9]+)");
+                    if (!empty(nextDieMsStr)) {
+                        try {
+                            long epochMs  = Long.parseLong(nextDieMsStr.trim());
+                            long secsLeft = (epochMs - System.currentTimeMillis()) / 1000;
+                            if (secsLeft > 0 && secsLeft < 86400L * 7)
+                                b.timer = "Auto dies in " + formatSecs(secsLeft);
+                            else if (secsLeft <= 0)
+                                b.timer = "Auto dies soon";
+                        } catch (NumberFormatException ignored) {}
+                    }
+                }
+                // Strategy 3: visible text "AUTO DIES AFTER: 00:50:13"
+                if (empty(b.timer)) {
+                    String rawTimer = first(html,
+                        "(?i)AUTO\\s+DIES\\s+AFTER[^0-9]{0,30}([0-9]{1,3}:[0-9]{2}(?::[0-9]{2})?)");
+                    if (!empty(rawTimer)) {
+                        try {
+                            String[] tp = rawTimer.trim().split(":");
+                            long secs = tp.length == 3
+                                ? Long.parseLong(tp[0])*3600 + Long.parseLong(tp[1])*60 + Long.parseLong(tp[2])
+                                : Long.parseLong(tp[0])*60   + Long.parseLong(tp[1]);
+                            b.timer = "Auto dies in " + formatSecs(secs);
+                        } catch (NumberFormatException ignored) {}
+                    }
                 }
 
                 // ── DAMAGE ────────────────────────────────────────────────────
@@ -673,15 +658,9 @@ public class BotForegroundService extends Service {
                         + "\" → \"" + b.name + "\"");
                 }
 
-                // Restore damage from session memory only when monster is ALIVE.
-                // If monster is dead, clear stale memory so it doesn't pollute
-                // the next spawn's readings (old high damage on new monster = wrong).
-                if (b.alive) {
-                    Long mem = aliveDamageByBoss.get(b.key);
-                    if (mem != null && mem > b.damage) b.damage = mem;
-                } else {
-                    aliveDamageByBoss.remove(b.key);
-                }
+                // Restore damage from session memory if higher than page value
+                Long mem = aliveDamageByBoss.get(b.key);
+                if (mem != null && mem > b.damage) b.damage = mem;
 
                 append("INFO", "Direct monster [" + b.name + "] id=" + monsterId
                     + " status=" + b.status + " dmg=" + fmtn(b.damage)
@@ -885,7 +864,14 @@ public class BotForegroundService extends Service {
             String userId = cookieValue("demon");
             if (empty(userId)) { append("ERROR","No demon cookie. Please reconnect/login first."); return; }
 
-            long damageCap = capForBoss(b.name, b.categoryKey);
+            // For direct monsters b.cap is set from "monster_cap_<prefKey>" in fetchDirectMonsters().
+            // capForBoss() looks up "cap_monsters_<root>" — a DIFFERENT key — so it always
+            // returns 0 for direct monsters, causing "no damage cap set" even when cap IS set.
+            // Use b.cap directly for direct monsters; capForBoss() for wave-parsed bosses.
+            long damageCap = (b.isDirectMonster && b.cap > 0)
+                ? b.cap
+                : capForBoss(b.name, b.categoryKey);
+            if (damageCap <= 0 && b.cap > 0) damageCap = b.cap; // final fallback
             notifBossName = b.name; notifCap = damageCap; notifDamage = Math.max(0, b.damage);
             update("CRN Boss Bot • TARGET", notificationBody("Target: " + b.name), false);
             if (damageCap <= 0) { append("INFO","Skipping " + b.name + ": no damage cap set."); return; }
