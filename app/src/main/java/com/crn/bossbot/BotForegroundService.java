@@ -1019,13 +1019,26 @@ public class BotForegroundService extends Service {
 
             int hitCount = 0;
             while (running && sp.getBoolean("global_enabled",false) && totalDamage < damageCap
-                           && isBossEnabledForAttack(b)) {
+                           && b.enabled) {
 
                 // ── PvP phase mid-session guard ────────────────────────────────
                 // Boss can transition to PvP phase during an active attack session.
                 // Check on every hit and bail out cleanly.
                 if (isBossInPvpPhase(b.name)) {
                     append("INFO", b.name + " transitioned to PvP phase mid-session — stopping.");
+                    break;
+                }
+                // ── Direct monster mid-session disable guard ───────────────────
+                // Re-reads the correct pref key so the user can toggle OFF during
+                // an active attack and have it respected on the next hit.
+                if (b.isDirectMonster) {
+                    String dk = b.key.startsWith("monsters:") ? b.key.substring(9) : b.key;
+                    if (!sp.getBoolean("monster_enabled_" + dk, false)) {
+                        append("INFO", b.name + " disabled mid-session — stopping.");
+                        break;
+                    }
+                } else if (!sp.getBoolean("boss_enabled_" + b.key, false)) {
+                    append("INFO", b.name + " disabled mid-session — stopping.");
                     break;
                 }
                 // ──────────────────────────────────────────────────────────────
