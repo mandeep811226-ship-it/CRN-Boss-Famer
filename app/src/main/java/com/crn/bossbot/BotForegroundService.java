@@ -924,6 +924,21 @@ public class BotForegroundService extends Service {
                 ? b.cap
                 : capForBoss(b.name, b.categoryKey);
             if (damageCap <= 0 && b.cap > 0) damageCap = b.cap; // final fallback
+            // Last-resort: re-read directly from SharedPrefs in case b.cap was lost in transit
+            if (damageCap <= 0 && b.isDirectMonster) {
+                String prefKeyDirect = b.key.startsWith("monsters:") ? b.key.substring(9) : b.key;
+                String capStored = sp.getString("monster_cap_" + prefKeyDirect, "0");
+                long capReread = parseCap(capStored);
+                if (capReread > 0) {
+                    append("DIAG", "Cap re-read from prefs for [" + b.name + "]: \""
+                        + capStored + "\" → " + fmtn(capReread) + " (b.cap was 0)");
+                    damageCap = capReread;
+                }
+            }
+            append("DIAG", "Cap check [" + b.name + "] b.cap=" + fmtn(b.cap)
+                + " damageCap=" + fmtn(damageCap)
+                + " isDirectMonster=" + b.isDirectMonster
+                + " key=" + b.key);
             notifBossName = b.name; notifCap = damageCap; notifDamage = Math.max(0, b.damage);
             update("CRN Boss Bot • TARGET", notificationBody("Target: " + b.name), false);
             if (damageCap <= 0) { append("INFO","Skipping " + b.name + ": no damage cap set."); return; }
